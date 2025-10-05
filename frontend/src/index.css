@@ -1,0 +1,28 @@
+@import 'tailwindcss';
+
+@import url('https://fonts.googleapis.com/css2?family=Poppins:ital,wght@0,100;0,200;0,300;0,400;0,500;0,600;0,700;0,800;0,900;1,100;1,200;1,300;1,400;1,500;1,600;1,700;1,800;1,900&display=swap');
+* {
+  font-family: 'Poppins', sans-serif;
+}
+
+/* src/styles/typography.css  (or paste into your existing src/index.css) */
+:root {
+  --font-sans: 'Poppins', ui-sans-serif, system-ui, -apple-system, Segoe UI,
+               Roboto, Helvetica, Arial, 'Apple Color Emoji', 'Segoe UI Emoji';
+}
+
+html, body {
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+/* Optional: slightly stronger headings + nicer small text */
+h1,h2,h3 { font-weight: 600; letter-spacing: -0.015em; }
+h4,h5,h6 { font-weight: 600; }
+.small   { font-size: 0.875rem; }
+.muted   { color: rgb(100 116 139); }
+
+/* Utility to opt-in on any container if you don't want global body override */
+.font-poppins { font-family: var(--font-sans); }
