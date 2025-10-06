@@ -1,31 +1,38 @@
 // src/lib/api.js
-export async function api(path, opts = {}) {
-  const base = import.meta.env.VITE_API || 'http://localhost:4000'
-  const tenant   = localStorage.getItem('tenant')   || sessionStorage.getItem('tenant')
-  const tenantId = localStorage.getItem('tenantId') || sessionStorage.getItem('tenantId')
-  const user     = localStorage.getItem('user')     || sessionStorage.getItem('user')
-  const token    = localStorage.getItem('token')    || sessionStorage.getItem('token')
+const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:4000';
 
-  const headers = {
-    'Content-Type': 'application/json',
-    ...(tenantId || tenant ? { 'x-tenant-id': tenantId || tenant } : {}),
-    ...(user ? { 'x-user-id': user } : {}),
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    ...(opts.headers || {}),
-  }
+function readAuth() {
+  try { return JSON.parse(localStorage.getItem('auth') || '{}'); }
+  catch { return {}; }
+}
 
-  const res = await fetch(`${base}${path}`, {
-    method: opts.method || 'GET',
-    headers,
-    body: opts.body ? JSON.stringify(opts.body) : undefined,
+export async function api(path, { method = 'GET', body, headers = {} } = {}) {
+  const auth   = readAuth();
+  const token  = auth?.token;
+  // Prefer tenant from auth; fall back to a manual localStorage key; finally 'demo' in dev.
+  const tenant = auth?.tenant?._id || auth?.tenant?.slug || localStorage.getItem('tenant') || 'demo';
+  const userId = auth?.user?._id;
+
+  const res = await fetch(`${API_BASE}${path}`, {
+    method,
     credentials: 'include',
-  })
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token  ? { Authorization: `Bearer ${token}` } : {}),
+      ...(tenant ? { 'x-tenant-id': tenant } : {}),
+      ...(userId ? { 'x-user-id': userId } : {}),
+      ...headers,
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+
+  const ct = res.headers.get('content-type') || '';
+  const parseJSON = () => ct.includes('application/json') ? res.json() : res.text();
 
   if (!res.ok) {
-    const text = await res.text().catch(() => '')
-    let msg = text
-    try { msg = JSON.parse(text).error || msg } catch {}
-    throw new Error(msg || res.statusText)
+    const err = await parseJSON().catch(() => ({}));
+    const msg = (err && err.error) || res.statusText || 'Request failed';
+    throw new Error(msg);
   }
-  try { return await res.json() } catch { return null }
+  return parseJSON();
 }

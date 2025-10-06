@@ -1,191 +1,97 @@
-// src/pages/Reports.jsx
 import React, { useEffect, useMemo, useState } from 'react'
 import Page from '../components/Page'
 import Card, { CardHeader, CardBody, Divider } from '../components/ui/Card'
 import { TableWrap, DataTable } from '../components/ui/Table'
 import { Btn, BtnGhost } from '../components/ui/Buttons'
 import { notify } from '../components/ui/Toast'
-import { data as store, inr } from '../data/store'
+import { inr } from '../data/store'
+import { api } from '../lib/api'
 
-/* ------------------------------- helpers -------------------------------- */
-const toDate = (d) => (d ? new Date(d) : null)
-const sameDay = (a, b) => a && b && a.toISOString().slice(0,10) === b.toISOString().slice(0,10)
-const fmtISO = (d) => d.toISOString().slice(0,10)
-const clamp = (v, a, b) => Math.max(a, Math.min(b, v))
-const sum = (arr, f = (x) => x) => arr.reduce((acc, x) => acc + (f(x) || 0), 0)
-
+/* helpers */
+const fmtISO = (d) => new Date(d).toISOString().slice(0,10)
 function startOfMonth(d=new Date()){ const x=new Date(d); x.setDate(1); return x }
-function startOfQuarter(d=new Date()){
-  const x=new Date(d); const q=Math.floor(x.getMonth()/3)*3; x.setMonth(q,1); return x
-}
+function startOfQuarter(d=new Date()){ const x=new Date(d); const q=Math.floor(x.getMonth()/3)*3; x.setMonth(q,1); return x }
 function startOfYear(d=new Date()){ const x=new Date(d); x.setMonth(0,1); return x }
 
-function within(d, from, to) { return !!d && d >= from && d <= to }
-
-function gstPortion(inv) {
-  // Prefer explicit fields
-  const up = Number(inv.unitPrice) || 0
-  const qty = Number(inv.qty) || 0
-  const gst = Number(inv.gst) || 0
-  if (up && qty && gst >= 0) return Math.round(up * qty * (gst/100))
-  // Fallback: if total & gst present but no unit/qty
-  const total = Number(inv.total) || 0
-  if (total && gst) return Math.round(total - (total / (1 + gst/100)))
-  return 0
-}
-
-function agingBucket(days) {
-  if (days <= 30) return '0–30'
-  if (days <= 60) return '31–60'
-  if (days <= 90) return '61–90'
-  return '90+'
-}
-
-function daysBetween(a, b) {
-  const ms = 24*60*60*1000
-  const start = new Date(a.getFullYear(), a.getMonth(), a.getDate())
-  const end = new Date(b.getFullYear(), b.getMonth(), b.getDate())
-  return Math.floor((end - start) / ms)
-}
-
-/* CSV export (array of objects) */
-function exportCSV(rows, filename='report.csv') {
-  if (!rows || rows.length === 0) {
-    notify.info('Nothing to export', 'No rows in this table'); 
-    return
-  }
-  const headers = Object.keys(rows[0])
-  const escape = (v) => {
-    const s = String(v ?? '')
-    if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`
-    return s
-  }
-  const csv = [headers.join(',')]
-    .concat(rows.map(r => headers.map(h => escape(r[h])).join(',')))
-    .join('\n')
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  document.body.appendChild(a)
-  a.click()
-  document.body.removeChild(a)
-  URL.revokeObjectURL(url)
-  notify.success('Export ready', filename ? `Saved: ${filename}` : 'CSV downloaded')
-}
-
-/* ------------------------------- component ------------------------------- */
 export default function Reports() {
   const today = new Date()
-
-  /* -------- range state + hash presets -------- */
   const [from, setFrom] = useState(startOfMonth(today))
   const [to, setTo] = useState(today)
 
+  // hash presets
   useEffect(() => {
-    const applyHashPreset = () => {
+    const apply = () => {
       const parts = window.location.hash.toLowerCase().split('#')
       if (parts.includes('mtd')) { setFrom(startOfMonth(today)); setTo(today) }
       else if (parts.includes('qtd')) { setFrom(startOfQuarter(today)); setTo(today) }
       else if (parts.includes('ytd')) { setFrom(startOfYear(today)); setTo(today) }
       else if (parts.includes('last30')) { const d=new Date(today); d.setDate(d.getDate()-29); setFrom(d); setTo(today) }
     }
-    applyHashPreset()
-    window.addEventListener('hashchange', applyHashPreset)
-    return () => window.removeEventListener('hashchange', applyHashPreset)
+    apply()
+    window.addEventListener('hashchange', apply)
+    return () => window.removeEventListener('hashchange', apply)
   }, [])
 
-  /* -------- source data -------- */
-  const invoices = store.invoices || []
-  const payments = store.payments || []
-  const bills    = store.bills || []
-
-  /* -------- filter by date range -------- */
-  const invInRange = useMemo(() => invoices.filter(i => within(toDate(i.date), from, to)), [invoices, from, to])
-  const payInRange = useMemo(() => payments.filter(p => within(toDate(p.date), from, to)), [payments, from, to])
-  const billInRange= useMemo(() => bills.filter(b => within(toDate(b.date), from, to)), [bills, from, to])
-
-  /* -------- summaries -------- */
-  const invTotalAmt   = sum(invInRange, (i)=>Number(i.total)||0)
-  const invCount      = invInRange.length
-  const avgInvoice    = invCount ? Math.round(invTotalAmt / invCount) : 0
-  const gstCollected  = sum(invInRange, gstPortion)
-
-  const payAmt        = sum(payInRange, (p)=>Number(p.amount)||0)
-  const payCount      = payInRange.length
-
-  const apOpenAmt     = sum(billInRange.filter(b=>b.status==='Open'), (b)=>Number(b.amount)||0)
-  const apOverdueAmt  = sum(billInRange.filter(b=>b.status==='Overdue'), (b)=>Number(b.amount)||0)
-
-/* -------- AR Aging (Invoices) -------- */
-const arAgingMap = { '0–30':0, '31–60':0, '61–90':0, '90+':0 }
-invoices.forEach(i => {
-  // unpaid = Open or Overdue (ignore Paid)
-  if (i.status === 'Paid') return
-  const issue = toDate(i.date)
-  const due = fallbackDue(issue, toDate(i.dueDate || i.due))
-  const amt = Number(i.total) || 0
-  if (!due || !amt) return
-
-  const diff = daysBetween(due, new Date()) // how many days past due
-  if (diff <= 0) return // not overdue
-
-  const bucket = diff <= 30 ? '0–30' : diff <= 60 ? '31–60' : diff <= 90 ? '61–90' : '90+'
-  arAgingMap[bucket] += amt
-})
-const arAgingRows = Object.entries(arAgingMap).map(([bucket, amount]) => ({ bucket, amount }))
-
-function atMidnight(d) { return new Date(d.getFullYear(), d.getMonth(), d.getDate()) }
-function daysBetween(a, b) { // b - a, in whole days
-  const A = atMidnight(a), B = atMidnight(b)
-  return Math.floor((B - A) / (24*60*60*1000))
-}
-
-const DEFAULT_TERMS_DAYS = 30
-function fallbackDue(issue, explicitDue) {
-  if (explicitDue) return explicitDue
-  if (!issue) return null
-  const d = new Date(issue)
-  d.setDate(d.getDate() + DEFAULT_TERMS_DAYS)
-  return d
-}
-
-  /* -------- AP Aging (Bills) -------- */
- const apAgingMap = { '0–30':0, '31–60':0, '61–90':0, '90+':0 }
-bills.forEach(b => {
-  if (b.status === 'Paid') return
-  const issue = toDate(b.date)
-  const due = fallbackDue(issue, toDate(b.due))
-  const amt = Number(b.amount) || 0
-  if (!due || !amt) return
-
-  const diff = daysBetween(due, new Date())
-  if (diff <= 0) return
-
-  const bucket = diff <= 30 ? '0–30' : diff <= 60 ? '31–60' : diff <= 90 ? '61–90' : '90+'
-  apAgingMap[bucket] += amt
-})
-const apAgingRows = Object.entries(apAgingMap).map(([bucket, amount]) => ({ bucket, amount }))
-
-
-  /* -------- Top customers by revenue -------- */
-  const byCustomer = {}
-  invInRange.forEach(i => {
-    const name = i.customerName || '—'
-    byCustomer[name] = (byCustomer[name] || 0) + (Number(i.total) || 0)
+  // backend data
+  const [loading, setLoading] = useState(false)
+  const [err, setErr] = useState('')
+  const [data, setData] = useState({
+    summary: { invoices:{}, payments:{}, ap:{} },
+    arAging: [], apAging: [],
+    invoices: [], topCustomers: [], recentPayments: []
   })
-  const topCustomers = Object.entries(byCustomer)
-    .map(([customer, total]) => ({ customer, total }))
-    .sort((a,b)=>b.total-a.total)
-    .slice(0,10)
 
-  /* -------- payments list (recent) -------- */
-  const recentPayments = [...payInRange]
-    .sort((a,b)=> new Date(b.date) - new Date(a.date))
-    .slice(0,10)
+  async function load() {
+    setLoading(true); setErr('')
+    try {
+      const q = `?from=${encodeURIComponent(fmtISO(from))}&to=${encodeURIComponent(fmtISO(to))}`
+      const res = await api(`/api/reports${q}`)
+      setData(res || {})
+    } catch (e) {
+      setErr(e?.message || 'Failed to load reports')
+    } finally {
+      setLoading(false)
+    }
+  }
 
-  /* ------------------------------- UI ------------------------------------ */
+  useEffect(() => { load() }, [from, to])
+
+  // map
+  const invTotalAmt  = +data?.summary?.invoices?.totalAmt || 0
+  const invCount     = +data?.summary?.invoices?.count || 0
+  const avgInvoice   = +data?.summary?.invoices?.avg || (invCount ? Math.round(invTotalAmt/invCount) : 0)
+  const gstCollected = +data?.summary?.invoices?.gstCollected || 0
+
+  const payAmt   = +data?.summary?.payments?.totalAmt || 0
+  const payCount = +data?.summary?.payments?.count || 0
+
+  const apOpenAmt    = +data?.summary?.ap?.openAmt || 0
+  const apOverdueAmt = +data?.summary?.ap?.overdueAmt || 0
+
+  const arAgingRows = data?.arAging || []
+  const apAgingRows = data?.apAging || []
+
+  const invInRange = data?.invoices || []
+  const topCustomers = data?.topCustomers || []
+  const recentPayments = data?.recentPayments || []
+
+  /* csv util */
+  const exportCSV = (rows, filename='report.csv') => {
+    if (!rows || !rows.length) { notify.info('Nothing to export'); return }
+    const headers = Object.keys(rows[0])
+    const escape = (v) => {
+      const s = String(v ?? '')
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+    }
+    const csv = [headers.join(',')]
+      .concat(rows.map(r => headers.map(h => escape(r[h])).join(','))).join('\n')
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a'); a.href = url; a.download = filename
+    document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url)
+    notify.success('Export ready', filename)
+  }
+
   return (
     <Page
       title="Reports"
@@ -199,34 +105,28 @@ const apAgingRows = Object.entries(apAgingMap).map(([bucket, amount]) => ({ buck
         </div>
       }
     >
-      {/* Range selector */}
+      {/* Filters */}
       <Card>
         <CardHeader title="Filters" subtitle="Choose a date range for all sections" />
         <CardBody>
           <div className="flex flex-wrap items-end gap-3">
             <label className="block">
               <div className="text-xs text-slate-600 mb-1">From</div>
-              <input
-                type="date"
-                className="w-48 rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-400"
-                value={fmtISO(from)}
-                onChange={(e)=>setFrom(new Date(e.target.value))}
-              />
+              <input type="date" className="w-48 rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-400"
+                value={fmtISO(from)} onChange={(e)=>setFrom(new Date(e.target.value))}/>
             </label>
             <label className="block">
               <div className="text-xs text-slate-600 mb-1">To</div>
-              <input
-                type="date"
-                className="w-48 rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-400"
-                value={fmtISO(to)}
-                onChange={(e)=>setTo(new Date(e.target.value))}
-              />
+              <input type="date" className="w-48 rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-400"
+                value={fmtISO(to)} onChange={(e)=>setTo(new Date(e.target.value))}/>
             </label>
             <div className="grow" />
             <div className="flex gap-2">
-              <BtnGhost onClick={() => { window.print(); }}>Print</BtnGhost>
+              <BtnGhost onClick={load}>{loading ? 'Loading…' : 'Refresh'}</BtnGhost>
+              <BtnGhost onClick={() => window.print()}>Print</BtnGhost>
             </div>
           </div>
+          {err && <div className="mt-2 text-sm text-rose-700">{err}</div>}
         </CardBody>
       </Card>
 
@@ -238,7 +138,7 @@ const apAgingRows = Object.entries(apAgingMap).map(([bucket, amount]) => ({ buck
         <Tile title="A/P open + overdue" value={inr(apOpenAmt + apOverdueAmt)} hint={`Open ${inr(apOpenAmt)} • Overdue ${inr(apOverdueAmt)}`} tone="rose" />
       </div>
 
-      {/* AR Aging */}
+      {/* Aging */}
       <div className="mt-4 grid grid-cols-1 xl:grid-cols-2 gap-4">
         <Card>
           <CardHeader
@@ -250,10 +150,7 @@ const apAgingRows = Object.entries(apAgingMap).map(([bucket, amount]) => ({ buck
             <TableWrap>
               <table className="w-full text-[13px]">
                 <thead className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur text-slate-600">
-                  <tr>
-                    <th className="py-3 px-3 text-left">Bucket</th>
-                    <th className="py-3 px-3 text-right">Amount</th>
-                  </tr>
+                  <tr><th className="py-3 px-3 text-left">Bucket</th><th className="py-3 px-3 text-right">Amount</th></tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {arAgingRows.map(r => (
@@ -268,7 +165,6 @@ const apAgingRows = Object.entries(apAgingMap).map(([bucket, amount]) => ({ buck
           </CardBody>
         </Card>
 
-        {/* AP Aging */}
         <Card>
           <CardHeader
             title="A/P Aging (Payables)"
@@ -279,10 +175,7 @@ const apAgingRows = Object.entries(apAgingMap).map(([bucket, amount]) => ({ buck
             <TableWrap>
               <table className="w-full text-[13px]">
                 <thead className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur text-slate-600">
-                  <tr>
-                    <th className="py-3 px-3 text-left">Bucket</th>
-                    <th className="py-3 px-3 text-right">Amount</th>
-                  </tr>
+                  <tr><th className="py-3 px-3 text-left">Bucket</th><th className="py-3 px-3 text-right">Amount</th></tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {apAgingRows.map(r => (
@@ -298,9 +191,8 @@ const apAgingRows = Object.entries(apAgingMap).map(([bucket, amount]) => ({ buck
         </Card>
       </div>
 
-      {/* Sales & Top customers & Payments list */}
+      {/* Sales / Top customers */}
       <div className="mt-4 grid grid-cols-1 xl:grid-cols-2 gap-4">
-        {/* Sales detail (Invoices in range) */}
         <Card>
           <CardHeader
             title="Invoices in range"
@@ -309,8 +201,8 @@ const apAgingRows = Object.entries(apAgingMap).map(([bucket, amount]) => ({ buck
               <BtnGhost onClick={()=>{
                 const rows = invInRange.map(i => ({
                   number: i.number, customer: i.customerName,
-                  date: i.date, dueDate: i.dueDate || '',
-                  status: i.status, total: Number(i.total)||0, gst: gstPortion(i)
+                  date: fmtISO(new Date(i.date)), dueDate: i.dueDate ? fmtISO(new Date(i.dueDate)) : '',
+                  status: i.status, total: +i.total || 0
                 }))
                 exportCSV(rows, `invoices-${fmtISO(from)}-to-${fmtISO(to)}.csv`)
               }}>Export CSV</BtnGhost>
@@ -319,14 +211,14 @@ const apAgingRows = Object.entries(apAgingMap).map(([bucket, amount]) => ({ buck
           <CardBody>
             <TableWrap>
               <DataTable
-                empty="No invoices"
+                empty={loading ? 'Loading…' : 'No invoices'}
                 initialSort={{ key: 'date', dir: 'desc' }}
                 columns={[
                   { key: 'number', header: '#'},
                   { key: 'customerName', header: 'Customer' },
                   { key: 'date', header: 'Date' },
                   { key: 'status', header: 'Status' },
-                  { key: 'total', header: 'Amount', align: 'right', render: (r)=>inr(Number(r.total)||0) },
+                  { key: 'total', header: 'Amount', align: 'right', render: (r)=>inr(+r.total||0) },
                 ]}
                 rows={invInRange}
               />
@@ -334,7 +226,6 @@ const apAgingRows = Object.entries(apAgingMap).map(([bucket, amount]) => ({ buck
           </CardBody>
         </Card>
 
-        {/* Top customers */}
         <Card>
           <CardHeader
             title="Top customers"
@@ -345,19 +236,16 @@ const apAgingRows = Object.entries(apAgingMap).map(([bucket, amount]) => ({ buck
             <TableWrap>
               <table className="w-full text-[13px]">
                 <thead className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur text-slate-600">
-                  <tr>
-                    <th className="py-3 px-3 text-left">Customer</th>
-                    <th className="py-3 px-3 text-right">Total</th>
-                  </tr>
+                  <tr><th className="py-3 px-3 text-left">Customer</th><th className="py-3 px-3 text-right">Total</th></tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {topCustomers.length === 0 && (
-                    <tr><td colSpan="2" className="p-6 text-center text-slate-500">No data</td></tr>
+                  {(!topCustomers || topCustomers.length === 0) && (
+                    <tr><td colSpan="2" className="p-6 text-center text-slate-500">{loading ? 'Loading…' : 'No data'}</td></tr>
                   )}
                   {topCustomers.map(r => (
                     <tr key={r.customer} className="hover:bg-slate-50">
                       <td className="py-3 px-3">{r.customer}</td>
-                      <td className="py-3 px-3 text-right">{inr(r.total)}</td>
+                      <td className="py-3 px-3 text-right">{inr(+r.total||0)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -375,9 +263,9 @@ const apAgingRows = Object.entries(apAgingMap).map(([bucket, amount]) => ({ buck
             subtitle={`${fmtISO(from)} → ${fmtISO(to)} (latest 10)`}
             actions={
               <BtnGhost onClick={()=>{
-                const rows = recentPayments.map(p => ({
-                  id: p.id, date: p.date, customer: p.customer,
-                  invoice: p.invoice, method: p.method, amount: Number(p.amount)||0
+                const rows = (recentPayments||[]).map(p => ({
+                  id: p.id, date: fmtISO(new Date(p.date)), customer: p.customer,
+                  invoice: p.invoice, method: p.method, amount: +p.amount || 0
                 }))
                 exportCSV(rows, `payments-${fmtISO(from)}-to-${fmtISO(to)}.csv`)
               }}>Export CSV</BtnGhost>
@@ -386,7 +274,7 @@ const apAgingRows = Object.entries(apAgingMap).map(([bucket, amount]) => ({ buck
           <CardBody>
             <TableWrap>
               <DataTable
-                empty="No payments"
+                empty={loading ? 'Loading…' : 'No payments'}
                 initialSort={{ key: 'date', dir: 'desc' }}
                 columns={[
                   { key: 'id', header: 'ID' },
@@ -394,7 +282,7 @@ const apAgingRows = Object.entries(apAgingMap).map(([bucket, amount]) => ({ buck
                   { key: 'customer', header: 'Customer' },
                   { key: 'invoice', header: 'Invoice #' },
                   { key: 'method', header: 'Method' },
-                  { key: 'amount', header: 'Amount', align: 'right', render: (r)=>inr(Number(r.amount)||0) },
+                  { key: 'amount', header: 'Amount', align: 'right', render: (r)=>inr(+r.amount||0) },
                 ]}
                 rows={recentPayments}
               />
@@ -406,7 +294,7 @@ const apAgingRows = Object.entries(apAgingMap).map(([bucket, amount]) => ({ buck
   )
 }
 
-/* ------------------------------- small UI ------------------------------- */
+/* small UI */
 function Tile({ title, value, hint, tone='emerald' }) {
   const tones = {
     emerald: 'from-emerald-600 to-emerald-500',

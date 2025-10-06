@@ -1,19 +1,17 @@
 // src/pages/ml/Categorize.jsx
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import Page from '../../components/Page'
 import Card, { CardHeader, CardBody } from '../../components/ui/Card'
 import { TableWrap, DataTable } from '../../components/ui/Table'
 import { Btn, BtnGhost } from '../../components/ui/Buttons'
 import SweetAlert from '../../components/ui/SweetAlert'
 import { notify } from '../../components/ui/Toast'
-import { data as store, inr, dd } from '../../data/store'
+import { inr, dd } from '../../data/store'
+import { api } from '../../lib/api'
 
-/* ---------------------------------- Setup ---------------------------------- */
-// Define the categories you care about (edit freely)
-const CATEGORIES = ['Uncategorized', 'Software', 'Utilities', 'Rent', 'Payroll', 'Supplies', 'Travel', 'Marketing', 'Fees', 'Other']
+const CATEGORIES = ['Uncategorized','Software','Utilities','Rent','Payroll','Supplies','Travel','Marketing','Fees','Other']
 
-// Simple keyword → category map for on-device "AI" suggestions (placeholder rules).
-// You can later swap this for a backend ML endpoint; the UI will stay the same.
+// same light rules locally (fallback if server suggest not reachable)
 const KEYWORDS = [
   { k: ['aws','azure','gcp','digitalocean','vultr'], cat: 'Software' },
   { k: ['google workspace','gmail','notion','slack','github','gitlab','jira','confluence','zoom','adobe'], cat: 'Software' },
@@ -25,99 +23,48 @@ const KEYWORDS = [
   { k: ['facebook ads','google ads','linkedin ads','campaign','adwords','meta'], cat: 'Marketing' },
   { k: ['fee','charge','commission','processing'], cat: 'Fees' },
 ]
-
-// Merge Bills (money out) + Payments (money in) into a single list for categorization.
-// Each row will carry {kind: 'BILL'|'PAYMENT'} and keep reference into store to persist.
-function buildItems() {
-  const out = []
-  ;(store.bills || []).forEach(b => {
-    out.push({
-      kind: 'BILL',
-      id: b.id,
-      date: b.date,
-      party: b.vendor,
-      description: b.memo || b.desc || '',
-      amount: Number(b.amount) || 0,
-      category: b.category || 'Uncategorized',
-      source: 'Bills',
-      status: b.status || 'Open',
-      _ref: b,
-    })
-  })
-  ;(store.payments || []).forEach(p => {
-    out.push({
-      kind: 'PAYMENT',
-      id: p.id,
-      date: p.date,
-      party: p.customer,
-      description: p.note || p.desc || '',
-      amount: Number(p.amount) || 0,
-      category: p.category || 'Uncategorized',
-      source: 'Payments',
-      method: p.method,
-      _ref: p,
-    })
-  })
-  // newest first
-  out.sort((a,b)=> new Date(b.date) - new Date(a.date))
-  return out
-}
-
-/* --------------------------------- Helpers --------------------------------- */
 const toText = (v) => (v || '').toString().toLowerCase()
-
-function suggestOne(row){
+function localSuggest(row){
   const hay = `${toText(row.party)} ${toText(row.description)}`
-  for (const rule of KEYWORDS) {
-    if (rule.k.some(w => hay.includes(w))) return rule.cat
-  }
-  // fallback heuristics
-  if (row.kind === 'PAYMENT') return 'Other'
-  return 'Supplies'
+  for (const r of KEYWORDS) if (r.k.some(w => hay.includes(w))) return r.cat
+  return row.kind === 'PAYMENT' ? 'Other' : 'Supplies'
 }
 
-function exportCSV(rows, filename='categorized-items.csv') {
-  if (!rows.length) { notify.info('Nothing to export'); return }
-  const headers = ['id','date','kind','source','party','description','amount','category']
-  const esc = (s)=> {
-    const v = String(s ?? '')
-    return /[",\n]/.test(v) ? `"${v.replace(/"/g,'""')}"` : v
-  }
-  const csv = [headers.join(',')].concat(rows.map(r => headers.map(h => esc(r[h])).join(','))).join('\n')
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a'); a.href = url; a.download = filename
-  document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url)
-  notify.success('Export ready', filename)
-}
-
-/* --------------------------------- Component -------------------------------- */
 export default function MLCategorize() {
-  const [rows, setRows] = useState(buildItems)
+  const [rows, setRows] = useState([])
   const [q, setQ] = useState('')
   const [cat, setCat] = useState('All')
   const [onlyUncat, setOnlyUncat] = useState(false)
+  const [loading, setLoading] = useState(false)
+  const [err, setErr] = useState('')
 
-  // selection for bulk ops
-  const [selected, setSelected] = useState(new Set())
+  // keep initial categories to compute minimal PATCH payload
+  const initialCat = useRef(new Map())
 
-  // confirm modal (bulk apply)
-  const [confirmOpen, setConfirmOpen] = useState(false)
-  const [targetAction, setTargetAction] = useState(null) // 'applyAll'|'applySelected'
+  const load = async () => {
+    setLoading(true); setErr('')
+    try {
+      const qs = new URLSearchParams()
+      if (onlyUncat) qs.set('onlyUncategorized','true')
+      const res = await api(`/api/ml/categorize?${qs.toString()}`)
+      const r = Array.isArray(res?.rows) ? res.rows : []
+      setRows(r)
+      // snapshot categories
+      const map = new Map()
+      r.forEach(x => map.set(x.id, x.category || 'Uncategorized'))
+      initialCat.current = map
+    } catch (e) {
+      setErr(e?.message || 'Failed to load'); setRows([])
+    } finally {
+      setLoading(false)
+    }
+  }
 
-  // refresh when store changes from other pages (simple listener)
-  useEffect(() => {
-    // optional: poll-less refresh on hash nav
-    const onHash = () => setRows(buildItems())
-    window.addEventListener('hashchange', onHash)
-    return () => window.removeEventListener('hashchange', onHash)
-  }, [])
+  useEffect(() => { load() }, [onlyUncat])
 
-  // computed analytics
   const filtered = useMemo(() => {
     let list = rows
     if (cat !== 'All') list = list.filter(r => r.category === cat)
-    if (onlyUncat) list = list.filter(r => r.category === 'Uncategorized')
     if (q.trim()) {
       const s = q.toLowerCase()
       list = list.filter(r =>
@@ -127,71 +74,76 @@ export default function MLCategorize() {
       )
     }
     return list
-  }, [rows, q, cat, onlyUncat])
+  }, [rows, q, cat])
 
   const byCat = useMemo(() => {
     const m = {}; CATEGORIES.forEach(c => m[c]=0)
-    rows.forEach(r => { m[r.category] = (m[r.category] || 0) + r.amount })
+    rows.forEach(r => { m[r.category || 'Uncategorized'] = (m[r.category || 'Uncategorized'] || 0) + (r.amount||0) })
     return m
   }, [rows])
 
-  const uncatCount = rows.filter(r => r.category === 'Uncategorized').length
+  const uncatCount = rows.filter(r => (r.category||'Uncategorized') === 'Uncategorized').length
   const totalAmt = rows.reduce((a,b)=>a + (b.amount||0), 0)
 
-  /* ------------------------------ Handlers ------------------------------ */
+  // selection
+  const [selected, setSelected] = useState(new Set())
+  const onToggleSelect = (id, on) => setSelected(prev => {
+    const next = new Set(prev); on ? next.add(id) : next.delete(id); return next
+  })
+
   const setRowCategory = (id, newCat) => {
     setRows(prev => prev.map(r => r.id === id ? ({ ...r, category: newCat }) : r))
   }
 
-  const onToggleSelect = (id, on) => {
-    setSelected(prev => {
-      const next = new Set(prev)
-      on ? next.add(id) : next.delete(id)
-      return next
-    })
-  }
-
-  const applySuggestionTo = (ids) => {
-    if (!ids.length) return
-    const next = rows.map(r => {
-      if (!ids.includes(r.id)) return r
-      const sug = suggestOne(r)
-      return { ...r, category: sug }
-    })
-    setRows(next)
-  }
-
-  const saveAll = () => {
-    // Persist categories back to the shared store objects
-    rows.forEach(r => {
-      if (r.kind === 'BILL') r._ref.category = r.category
-      else if (r.kind === 'PAYMENT') r._ref.category = r.category
-    })
-    notify.success('Categories saved', 'Synced with Bills/Payments')
-  }
-
-  const applyAll = () => { setTargetAction('applyAll'); setConfirmOpen(true) }
-  const applySelected = () => { setTargetAction('applySelected'); setConfirmOpen(true) }
-
-  const onConfirm = () => {
-    if (targetAction === 'applyAll') {
-      applySuggestionTo(rows.map(r => r.id))
-      notify.info('Suggestions applied', 'All rows updated')
-    } else if (targetAction === 'applySelected') {
-      applySuggestionTo([...selected])
-      notify.info('Suggestions applied', `${selected.size} selected row(s) updated`)
+  // try server-side suggest first; fallback to local
+  const applySuggestionTo = async (ids) => {
+    const targets = rows.filter(r => ids.includes(r.id))
+    if (!targets.length) return
+    try {
+      const resp = await api('/api/ml/categorize/suggest', {
+        method: 'POST',
+        body: { rows: targets.map(({ id, kind, party, description }) => ({ id, kind, party, description })) }
+      })
+      const map = new Map((resp?.suggestions||[]).map(s => [s.id, s.category]))
+      setRows(prev => prev.map(r => ids.includes(r.id) ? ({ ...r, category: map.get(r.id) || localSuggest(r) }) : r))
+    } catch {
+      setRows(prev => prev.map(r => ids.includes(r.id) ? ({ ...r, category: localSuggest(r) }) : r))
     }
+  }
+
+  const saveAll = async () => {
+    const updates = rows
+      .filter(r => initialCat.current.get(r.id) !== (r.category || 'Uncategorized'))
+      .map(r => ({ kind: r.kind, id: r.id, category: r.category || 'Uncategorized' }))
+    if (!updates.length) { notify.info('Nothing to save'); return }
+    try {
+      const res = await api('/api/ml/categorize', { method: 'PATCH', body: { updates } })
+      notify.success('Categories saved', `${res?.ok || updates.length} updated`)
+      // refresh baseline
+      updates.forEach(u => initialCat.current.set(u.id, u.category))
+    } catch (e) {
+      notify.error('Save failed', e?.message || '')
+    }
+  }
+
+  // confirm modal (bulk apply)
+  const [confirmOpen, setConfirmOpen] = useState(false)
+  const [targetAction, setTargetAction] = useState(null)
+  const applyAll = () => { setTargetAction('all'); setConfirmOpen(true) }
+  const applySelected = () => { setTargetAction('sel'); setConfirmOpen(true) }
+  const onConfirm = async () => {
+    if (targetAction === 'all') await applySuggestionTo(filtered.map(r => r.id))
+    if (targetAction === 'sel') await applySuggestionTo([...selected])
     setConfirmOpen(false); setTargetAction(null)
   }
 
-  /* ----------------------------------- UI ----------------------------------- */
   return (
     <Page
       title="Analytics & AI — Categorize"
-      subtitle="Classify bills and payments into expense/income categories. Suggestions run locally (no server needed)."
+      subtitle="Classify bills and payments into categories. Suggestions are served by your backend (with local fallback)."
       actions={
         <div className="flex gap-2">
-          <BtnGhost onClick={()=>exportCSV(filtered, 'categorized-filtered.csv')}>Export CSV</BtnGhost>
+          <BtnGhost onClick={load}>{loading ? 'Loading…' : 'Refresh'}</BtnGhost>
           <Btn onClick={saveAll}>Save categories</Btn>
         </div>
       }
@@ -205,7 +157,7 @@ export default function MLCategorize() {
         <Tile tone="emerald" title="Top category" value={topCategory(byCat)} hint="by amount" />
       </div>
 
-      {/* Category totals table (small analytics) */}
+      {/* Filters & bulk actions */}
       <div className="mt-4 grid grid-cols-1 xl:grid-cols-2 gap-4">
         <Card>
           <CardHeader title="Category totals" subtitle="Sum of amounts by category" />
@@ -213,10 +165,7 @@ export default function MLCategorize() {
             <TableWrap>
               <table className="w-full text-[13px]">
                 <thead className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur text-slate-600">
-                  <tr>
-                    <th className="py-3 px-3 text-left">Category</th>
-                    <th className="py-3 px-3 text-right">Amount</th>
-                  </tr>
+                  <tr><th className="py-3 px-3 text-left">Category</th><th className="py-3 px-3 text-right">Amount</th></tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {CATEGORIES.map(c => (
@@ -250,17 +199,14 @@ export default function MLCategorize() {
                 {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
               </select>
               <label className="inline-flex items-center gap-2 text-sm text-slate-700">
-                <input
-                  type="checkbox"
-                  checked={onlyUncat}
-                  onChange={(e)=>setOnlyUncat(e.target.checked)}
-                />
+                <input type="checkbox" checked={onlyUncat} onChange={(e)=>setOnlyUncat(e.target.checked)} />
                 Only uncategorized
               </label>
               <div className="grow" />
-              <BtnGhost onClick={applySelected}>AI for selected</BtnGhost>
-              <Btn onClick={applyAll}>AI for all</Btn>
+              <BtnGhost onClick={applySelected} disabled={!selected.size}>AI for selected</BtnGhost>
+              <Btn onClick={applyAll} disabled={!filtered.length}>AI for all</Btn>
             </div>
+            {err && <div className="mt-2 text-sm text-rose-700">{err}</div>}
           </CardBody>
         </Card>
       </div>
@@ -269,19 +215,13 @@ export default function MLCategorize() {
       <div className="mt-4">
         <TableWrap>
           <DataTable
-            empty="Nothing to review"
+            empty={loading ? 'Loading…' : 'Nothing to review'}
             initialSort={{ key: 'date', dir: 'desc' }}
             columns={[
               {
-                key: '_sel',
-                header: '',
-                width: 24,
+                key: '_sel', header: '', width: 24,
                 render: (r) => (
-                  <input
-                    type="checkbox"
-                    checked={selected.has(r.id)}
-                    onChange={(e)=>onToggleSelect(r.id, e.target.checked)}
-                  />
+                  <input type="checkbox" checked={selected.has(r.id)} onChange={(e)=>onToggleSelect(r.id, e.target.checked)} />
                 )
               },
               { key: 'date', header: 'Date', render: (r)=>dd(r.date) },
@@ -292,8 +232,7 @@ export default function MLCategorize() {
               { key: 'description', header: 'Description' },
               { key: 'amount', header: 'Amount', align: 'right', render: (r)=>inr(r.amount) },
               {
-                key: 'category',
-                header: 'Category',
+                key: 'category', header: 'Category',
                 render: (r)=>(
                   <select
                     className="rounded-md border border-slate-300 bg-white px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-emerald-400"
@@ -305,16 +244,11 @@ export default function MLCategorize() {
                 )
               },
               {
-                key: '_ai',
-                header: 'AI',
-                align: 'right',
-                render: (r)=>(
-                  <BtnGhost onClick={()=>{
-                    const sug = suggestOne(r)
-                    setRowCategory(r.id, sug)
-                    notify.info('Suggested', `${r.id} → ${sug}`)
-                  }}>Suggest</BtnGhost>
-                )
+                key: '_ai', header: 'AI', align: 'right',
+                render: (r)=>(<BtnGhost onClick={async ()=>{
+                  await applySuggestionTo([r.id])
+                  notify.info('Suggested', `${r.id} updated`)
+                }}>Suggest</BtnGhost>)
               }
             ]}
             rows={filtered}
@@ -326,7 +260,7 @@ export default function MLCategorize() {
       <SweetAlert
         open={confirmOpen}
         title="Apply AI suggestions?"
-        message={targetAction === 'applySelected'
+        message={targetAction === 'sel'
           ? `This will suggest categories for ${selected.size} selected item(s).`
           : 'This will suggest categories for ALL visible rows.'}
         confirmText="Apply"
@@ -339,7 +273,7 @@ export default function MLCategorize() {
   )
 }
 
-/* ------------------------------- Small UI bits ------------------------------ */
+/* UI bits */
 function Tile({ title, value, hint, tone='emerald' }) {
   const tones = {
     emerald: 'from-emerald-600 to-emerald-500',
@@ -361,7 +295,6 @@ function Tile({ title, value, hint, tone='emerald' }) {
     </div>
   )
 }
-
 function Badge({ tone='emerald', label }) {
   const map = {
     emerald: 'bg-emerald-50 text-emerald-700 border-emerald-200',
@@ -371,7 +304,6 @@ function Badge({ tone='emerald', label }) {
   }
   return <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs border ${map[tone]}`}>{label}</span>
 }
-
 function topCategory(byCatObj){
   let best = '—', max = -1
   Object.entries(byCatObj).forEach(([k,v]) => { if (v > max && k !== 'Uncategorized') { max=v; best=k } })

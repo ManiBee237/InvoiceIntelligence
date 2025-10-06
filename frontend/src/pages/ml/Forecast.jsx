@@ -1,195 +1,14 @@
-// src/pages/ml/Forecast.jsx
 import React, { useEffect, useMemo, useState } from 'react'
 import Page from '../../components/Page'
 import Card, { CardHeader, CardBody } from '../../components/ui/Card'
 import { TableWrap, DataTable } from '../../components/ui/Table'
 import { Btn, BtnGhost } from '../../components/ui/Buttons'
 import { notify } from '../../components/ui/Toast'
-import { data as store, inr, dd } from '../../data/store'
+import { inr, dd } from '../../data/store'
+import { api } from '../../lib/api'
 
-/* ------------------------------- helpers -------------------------------- */
-const toDate = (d) => (d ? new Date(d) : null)
-const atMidnight = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate())
-const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate()+n); return x }
-const daysBetween = (a, b) => Math.floor((atMidnight(b) - atMidnight(a)) / (24*60*60*1000))
-const clamp = (v, a, b) => Math.max(a, Math.min(b, v))
-const fmt = (d) => (d ? d.toISOString().slice(0,10) : '')
-
-/* Learn historical average delay (invoice date -> payment date), approx by name */
-function learnDelays(invoices, payments) {
-  const overall = []
-  const perCustomer = {}
-  const payIdx = {}
-  payments.forEach(p => {
-    const key = (p.customer || '—').toLowerCase()
-    if (!payIdx[key]) payIdx[key] = []
-    payIdx[key].push(p)
-  })
-  invoices.forEach(inv => {
-    if (inv.status !== 'Paid') return
-    const custKey = (inv.customerName || '—').toLowerCase()
-    const invDate = toDate(inv.date)
-    const candidates = (payIdx[custKey] || []).filter(p => toDate(p.date))
-    if (!candidates.length || !invDate) return
-    let best = null, bestDelta = Infinity
-    candidates.forEach(p => {
-      const delta = daysBetween(invDate, toDate(p.date))
-      if (delta >= 0 && delta < bestDelta) { best = p; bestDelta = delta }
-    })
-    if (best) {
-      overall.push(bestDelta)
-      ;(perCustomer[custKey] ||= []).push(bestDelta)
-    }
-  })
-  const avg = (arr) => arr.length ? Math.round(arr.reduce((a,b)=>a+b,0)/arr.length) : 0
-  return {
-    overallAvg: avg(overall),
-    perCustomerAvg: Object.fromEntries(Object.entries(perCustomer).map(([k, arr]) => [k, avg(arr)]))
-  }
-}
-
-/* Light risk score reused for forecast shifting */
-function riskScore(inv) {
-  const due = toDate(inv.dueDate || inv.due)
-  const today = new Date()
-  const dpd = due ? daysBetween(due, today) : 0
-  let s = 0
-  if (inv.status === 'Overdue') s += 25 + clamp(dpd, 0, 30)
-  const amt = Number(inv.total) || 0
-  s += amt > 50000 ? 15 : amt > 10000 ? 8 : 3
-  return clamp(Math.round(s), 0, 100)
-}
-
-/* Expected date baseline (no probabilistic spreading yet) */
-function expectedDate(inv, opts, learned) {
-  const today = atMidnight(new Date())
-  const invDate = toDate(inv.date)
-  let due = toDate(inv.dueDate || inv.due)
-  if (!due && invDate) due = addDays(invDate, opts.defaultTerms)
-  if (!due) return null
-
-  const custKey = (inv.customerName || '—').toLowerCase()
-  const baseDelay = learned.perCustomerAvg[custKey] ?? learned.overallAvg ?? 0
-
-  // risk multiplier
-  const r = riskScore(inv)
-  let mult = 1
-  if (r >= 80) mult = opts.multCritical
-  else if (r >= 60) mult = opts.multHigh
-  else if (r >= 35) mult = opts.multMedium
-
-  // collection push pulls earlier
-  const pull = -Math.abs(opts.collectionPush)
-  const shiftDays = Math.round(baseDelay * mult) + pull
-  let est = addDays(due, shiftDays)
-
-  if (est < today) est = today
-  const horizonEnd = addDays(today, opts.horizonDays-1)
-  if (est > horizonEnd) est = horizonEnd
-  return atMidnight(est)
-}
-
-/* Prob. mass over N days. shape: 'geometric' | 'linear' | 'flat'
-   risk tweaks tail-heaviness for geometric. Returns array of length N summing to 1. */
-function probMass(N, shape, risk) {
-  const n = Math.max(1, N)
-  if (shape === 'flat') return Array.from({length:n},()=>1/n)
-
-  if (shape === 'linear') {
-    // front-loaded linear: weights n, n-1, ..., 1
-    const w = Array.from({length:n},(_,i)=> n - i)
-    const s = w.reduce((a,b)=>a+b,0)
-    return w.map(x => x/s)
-  }
-
-  // geometric (front-loaded with tail). Risk increases tail (smaller p)
-  // base p ~ 0.6; risk 0..100 -> p in [0.75 .. 0.45]
-  const p = 0.75 - (clamp(risk,0,100)/100)*0.30
-  const w = Array.from({length:n},(_,k)=> Math.pow(1-p, k))
-  const s = w.reduce((a,b)=>a+b,0)
-  return w.map(x => x/s)
-}
-
-/* Build forecast with probabilistic spreading and optional early-payment discount what-if */
-function buildForecast(invoices, payments, opts) {
-  const learned = learnDelays(invoices, payments)
-  const today = atMidnight(new Date())
-  const days = Array.from({ length: opts.horizonDays }, (_, i) => fmt(addDays(today, i)))
-  const buckets = Object.fromEntries(days.map(d => [d, 0]))
-
-  const detail = [] // per-invoice expected slices (for export/inspection)
-
-  invoices
-    .filter(i => i.status !== 'Paid')
-    .forEach(i => {
-      const baseEst = expectedDate(i, opts, learned)
-      const baseAmt = Number(i.total) || 0
-      if (!baseEst || !baseAmt) return
-
-      const r = riskScore(i)
-      const mass = probMass(opts.spreadDays, opts.spreadShape, r)
-      const horizonEnd = addDays(today, opts.horizonDays-1)
-
-      // What-if split: a portion (uptakeRate) accepts discount and pays earlier with reduced amount
-      const uptake = clamp(opts.discountUptake/100, 0, 1)
-      const disc = clamp(opts.discountPercent/100, 0, 1)
-      const shift = Math.max(0, Math.round(opts.discountPullForwardDays))
-      const earlyAmt = baseAmt * uptake * (1 - disc)
-      const normalAmt = baseAmt * (1 - uptake)
-
-      // normal portion spread from baseEst forward
-      mass.forEach((p, idx) => {
-        let d = addDays(baseEst, idx)
-        if (d > horizonEnd) d = horizonEnd
-        const key = fmt(d)
-        const slice = normalAmt * p
-        buckets[key] = (buckets[key] || 0) + slice
-        if (slice > 0) detail.push({
-          expectedDate: key, number: i.number, customer: i.customerName || '—',
-          status: i.status || 'Open', risk: r, portion: 'normal', amount: Math.round(slice)
-        })
-      })
-
-      // discounted early portion spread from (baseEst - shift) forward
-      if (earlyAmt > 0 && shift > 0) {
-        mass.forEach((p, idx) => {
-          let d = addDays(baseEst, Math.max(0, idx - shift))
-          if (d < today) d = today
-          if (d > horizonEnd) d = horizonEnd
-          const key = fmt(d)
-          const slice = earlyAmt * p
-          buckets[key] = (buckets[key] || 0) + slice
-          if (slice > 0) detail.push({
-            expectedDate: key, number: i.number, customer: i.customerName || '—',
-            status: i.status || 'Open', risk: r, portion: 'discounted', amount: Math.round(slice)
-          })
-        })
-      }
-    })
-
-  const dailyRows = days.map(d => ({ date: d, amount: Math.round(buckets[d] || 0) }))
-  const total = dailyRows.reduce((a,b)=>a + b.amount, 0)
-
-  // Top expected payers (aggregate by invoice across slices → earliest date + sum)
-  const agg = {}
-  detail.forEach(x => {
-    const key = x.number
-    if (!agg[key]) agg[key] = { number: x.number, customer: x.customer, earliest: x.expectedDate, amount: 0, risk: x.risk, status: x.status }
-    agg[key].amount += x.amount
-    if (new Date(x.expectedDate) < new Date(agg[key].earliest)) agg[key].earliest = x.expectedDate
-  })
-  const topPayers = Object.values(agg)
-    .sort((a,b) => new Date(a.earliest) - new Date(b.earliest) || b.amount - a.amount)
-    .slice(0, 10)
-
-  return { dailyRows, total, detail, topPayers, learned }
-}
-
-/* -------------------------------- Component ------------------------------- */
+/* ------------------------------- component ------------------------------- */
 export default function MLForecast() {
-  const invoices = store.invoices || []
-  const payments = store.payments || []
-
   // Assumptions + What-If controls
   const [opts, setOpts] = useState({
     horizonDays: 30,
@@ -209,9 +28,50 @@ export default function MLForecast() {
     discountPullForwardDays: 5     // days earlier for the discounted portion
   })
 
-  const { dailyRows, total, detail, topPayers, learned } = useMemo(
-    () => buildForecast(invoices, payments, opts),
-    [invoices, payments, opts]
+  const [loading, setLoading] = useState(false)
+  const [err, setErr] = useState('')
+  const [resp, setResp] = useState({
+    dailyRows: [],
+    total: 0,
+    detail: [],
+    topPayers: [],
+    learned: { overallAvg: 0, perCustomerAvg: {} }
+  })
+
+  useEffect(() => {
+    let alive = true
+    ;(async () => {
+      setLoading(true); setErr('')
+      try {
+        const q = new URLSearchParams({
+          horizonDays: String(opts.horizonDays),
+          defaultTerms: String(opts.defaultTerms),
+          multMedium: String(opts.multMedium),
+          multHigh: String(opts.multHigh),
+          multCritical: String(opts.multCritical),
+          collectionPush: String(opts.collectionPush),
+          spreadDays: String(opts.spreadDays),
+          spreadShape: String(opts.spreadShape),
+          discountPercent: String(opts.discountPercent),
+          discountUptake: String(opts.discountUptake),
+          discountPullForwardDays: String(opts.discountPullForwardDays),
+        })
+        const data = await api(`/api/ml/forecast?${q.toString()}`)
+        if (!alive) return
+        setResp(data || { dailyRows: [], total: 0, detail: [], topPayers: [], learned: { overallAvg: 0, perCustomerAvg: {} } })
+      } catch (e) {
+        if (alive) setErr(e?.message || 'Failed to load forecast')
+      } finally {
+        if (alive) setLoading(false)
+      }
+    })()
+    return () => { alive = false }
+  }, [opts])
+
+  const { dailyRows, total, detail, topPayers, learned } = resp
+  const unpaidCount = useMemo(
+    () => (detail?.length ? new Set(detail.map(d => d.number)).size : 0),
+    [detail]
   )
 
   // Exports
@@ -295,9 +155,11 @@ export default function MLForecast() {
           </div>
 
           <div className="mt-3 text-[12px] text-slate-600">
-            <b>Learned from history:</b> Avg delay overall <b>{pluralDay(learned.overallAvg)}</b>
-            {Object.keys(learned.perCustomerAvg||{}).length > 0 && <> • per-customer applied when available</>}
+            <b>Learned from history:</b> Avg delay overall <b>{pluralDay(resp?.learned?.overallAvg || 0)}</b>
+            {Object.keys(resp?.learned?.perCustomerAvg||{}).length > 0 && <> • per-customer applied when available</>}
           </div>
+
+          {err && <div className="mt-2 text-sm text-rose-700">{err}</div>}
         </CardBody>
       </Card>
 
@@ -306,7 +168,7 @@ export default function MLForecast() {
         <Tile tone="emerald" title="Forecast total" value={inr(total)} hint={`Next ${opts.horizonDays} days`} />
         <Tile tone="sky" title="Days with cash-in" value={dailyRows.filter(d=>d.amount>0).length} hint="Non-zero days" />
         <Tile tone="amber" title="Avg / active day" value={inr(avgNonZero(dailyRows))} hint="Across non-zero days" />
-        <Tile tone="rose" title="Unpaid invoices" value={(store.invoices||[]).filter(i=>i.status!=='Paid').length} />
+        <Tile tone="rose" title="Unpaid invoices" value={unpaidCount} />
       </div>
 
       {/* Forecast schedule & Top payers */}
@@ -316,7 +178,7 @@ export default function MLForecast() {
           <CardBody>
             <TableWrap>
               <DataTable
-                empty="No projected cash"
+                empty={loading ? 'Loading…' : 'No projected cash'}
                 initialSort={{ key: 'date', dir: 'asc' }}
                 columns={[
                   { key: 'date', header: 'Date' },
@@ -344,7 +206,7 @@ export default function MLForecast() {
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {topPayers.length === 0 && (
-                    <tr><td colSpan="5" className="p-6 text-center text-slate-500">No candidates</td></tr>
+                    <tr><td colSpan="5" className="p-6 text-center text-slate-500">{loading ? 'Loading…' : 'No candidates'}</td></tr>
                   )}
                   {topPayers.map(r => (
                     <tr key={r.number} className="hover:bg-slate-50">

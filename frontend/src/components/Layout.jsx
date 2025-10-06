@@ -352,12 +352,12 @@ export default function Layout({ children }) {
                 icon="reports"
                 current={is("#/reports")}
               />
-              <Leaf
+              {/* <Leaf
                 href="#/ml/categorize"
                 label="Categorize Items"
                 icon="ai"
                 current={is("#/ml/categorize")}
-              />
+              /> */}
               <Leaf
                 href="#/ml/latepay"
                 label="Late Pay Risk"

@@ -1,107 +1,115 @@
-import express from 'express'
-import bcrypt from 'bcryptjs'
-import jwt from 'jsonwebtoken'
-import Tenant from '../models/Tenant.js'
-import User from '../models/User.js'
+// src/routes/auth.js
+import express from 'express';
+import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
+import Tenant from '../models/Tenant.js';
+import User from '../models/User.js';
 
-const router = express.Router()
-const slugify = s => String(s||'').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'')
+const router = express.Router();
+const JWT_SECRET = process.env.JWT_SECRET || 'devsecret';
+const TOKEN_TTL = process.env.JWT_TTL || '7d';
 
-// POST /api/auth/register
+// Resolve a tenant by id/slug/name (slug preferred)
+async function resolveTenant(key) {
+  if (!key) return null;
+  // ObjectId?
+  if (/^[a-f0-9]{24}$/i.test(key)) {
+    const t = await Tenant.findById(key);
+    return t || null;
+  }
+  // slug / name
+  return await Tenant.findOne({ $or: [{ slug: key }, { name: key }] });
+}
+
+function signToken(userDoc, tenantDoc) {
+  return jwt.sign(
+    { userId: String(userDoc._id), role: userDoc.role, tenantId: String(tenantDoc._id) },
+    JWT_SECRET,
+    { expiresIn: TOKEN_TTL }
+  );
+}
+
+/**
+ * POST /api/auth/register
+ * body: { tenant, tenantName, email, password, name }
+ * - creates tenant (if not exists) and an admin user
+ */
 router.post('/register', async (req, res) => {
   try {
-    const { tenant, tenantName, email, password, name } = req.body || {}
-    if (!tenant && !tenantName) return res.status(400).json({ error: 'tenant or tenantName required' })
-    if (!email || !password)   return res.status(400).json({ error: 'email and password required' })
+    const { tenant, tenantName, email, password, name } = req.body || {};
+    if (!email || !password) return res.status(400).json({ error: 'Email & password required' });
 
-    const slug = tenant ? slugify(tenant) : slugify(tenantName)
-    let ten = await Tenant.findOne({ slug })
-    if (!ten) ten = await Tenant.create({ name: tenantName || slug, slug })
+    // tenant: slug or id or plain string
+    let tenantDoc = await resolveTenant(tenant);
+    if (!tenantDoc) {
+      if (!tenantName && !tenant) return res.status(400).json({ error: 'Tenant missing' });
+      const slug = (tenant || tenantName || email.split('@')[1] || 'demo')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/(^-|-$)/g, '');
+      tenantDoc = await Tenant.create({
+        name: tenantName || slug,
+        slug
+      });
+    }
 
-    const passwordHash = await bcrypt.hash(password, 10)
-    const user = await User.create({
-      tenantId: ten._id,
-      email: String(email).toLowerCase(),
+    const existing = await User.findOne({ email: email.toLowerCase(), tenantId: tenantDoc._id });
+    if (existing) return res.status(409).json({ error: 'User already exists for this tenant' });
+
+    const hash = await bcrypt.hash(password, 10);
+    const userDoc = await User.create({
+      email: email.toLowerCase(),
       name: name || email.split('@')[0],
-      passwordHash,
-      roles: ['owner'],
-    })
+      role: 'admin',
+      passwordHash: hash,
+      tenantId: tenantDoc._id
+    });
 
-    res.json({ user, tenantId: ten._id, tenantSlug: ten.slug })
-  } catch (err) {
-    if (err?.code === 11000) return res.status(409).json({ error: 'User already exists for this tenant' })
-    console.error('[auth/register]', err)
-    res.status(500).json({ error: 'Internal Error' })
+    const token = signToken(userDoc, tenantDoc);
+
+    res.json({
+      token,
+      user: { _id: userDoc._id, name: userDoc.name, email: userDoc.email, role: userDoc.role },
+      tenant: { _id: tenantDoc._id, name: tenantDoc.name, slug: tenantDoc.slug }
+    });
+  } catch (e) {
+    console.error('[auth/register]', e);
+    res.status(500).json({ error: 'Registration failed' });
   }
-})
+});
 
-// POST /api/auth/login
+/**
+ * POST /api/auth/login
+ * body: { tenant, email, password }
+ */
 router.post('/login', async (req, res) => {
   try {
-    const { email, password, tenant } = req.body || {}
-    if (!email || !password) return res.status(400).json({ error: 'email and password required' })
+    const { tenant, email, password } = req.body || {};
+    if (!tenant || !email || !password) return res.status(400).json({ error: 'tenant, email, password required' });
 
-    let ten
-    if (tenant) {
-      ten = await Tenant.findOne({ slug: slugify(tenant) })
-      if (!ten) return res.status(404).json({ error: 'Tenant not found' })
-    } else if (req.headers['x-tenant-id']) {
-      ten = await Tenant.findById(req.headers['x-tenant-id'])
-      if (!ten) return res.status(404).json({ error: 'Tenant not found' })
-    } else {
-      // demo auto-provision
-      ten = await Tenant.findOne({ slug: 'demo' })
-      if (!ten) ten = await Tenant.create({ name: 'Demo', slug: 'demo' })
-    }
+    const tenantDoc = await resolveTenant(tenant);
+    if (!tenantDoc) return res.status(400).json({ error: 'Unknown tenant' });
 
-    let user = await User.findOne({ tenantId: ten._id, email: String(email).toLowerCase() })
-    if (!user) {
-      // allow auto-provision in demo only
-      if (ten.slug === 'demo') {
-        const passwordHash = await bcrypt.hash(password, 10)
-        user = await User.create({
-          tenantId: ten._id,
-          email: String(email).toLowerCase(),
-          name: 'Demo User',
-          passwordHash,
-          roles: ['admin'],
-        })
-      } else {
-        return res.status(401).json({ error: 'Invalid credentials' })
-      }
-    }
+    const userDoc = await User.findOne({ email: email.toLowerCase(), tenantId: tenantDoc._id });
+    if (!userDoc) return res.status(401).json({ error: 'Invalid credentials' });
 
-    const ok = await bcrypt.compare(password, user.passwordHash)
-    if (!ok) return res.status(401).json({ error: 'Invalid credentials' })
+    const ok = await bcrypt.compare(password, userDoc.passwordHash || '');
+    if (!ok) return res.status(401).json({ error: 'Invalid credentials' });
 
-    user.lastLoginAt = new Date()
-    await user.save()
+    const token = signToken(userDoc, tenantDoc);
 
-    const token = process.env.JWT_SECRET
-      ? jwt.sign({ sub: String(user._id), t: String(ten._id) }, process.env.JWT_SECRET, { expiresIn: '7d' })
-      : null
-
-    res.json({ user, tenantId: ten._id, tenantSlug: ten.slug, token })
-  } catch (err) {
-    console.error('[auth/login]', err)
-    res.status(500).json({ error: 'Internal Error' })
+    res.json({
+      token,
+      user: { _id: userDoc._id, name: userDoc.name, email: userDoc.email, role: userDoc.role },
+      tenant: { _id: tenantDoc._id, name: tenantDoc.name, slug: tenantDoc.slug }
+    });
+  } catch (e) {
+    console.error('[auth/login]', e);
+    res.status(500).json({ error: 'Login failed' });
   }
-})
+});
 
-// GET /api/auth/me (expects headers set by frontend)
-router.get('/me', async (req, res) => {
-  try {
-    const userId = req.headers['x-user-id']
-    const tenantId = req.headers['x-tenant-id']
-    if (!userId || !tenantId) return res.status(400).json({ error: 'Missing headers' })
-    const user = await User.findOne({ _id: userId, tenantId })
-    if (!user) return res.status(404).json({ error: 'Not found' })
-    const t = await Tenant.findById(tenantId).lean()
-    res.json({ user, tenantId, tenantSlug: t?.slug })
-  } catch (err) {
-    console.error('[auth/me]', err)
-    res.status(500).json({ error: 'Internal Error' })
-  }
-})
+/** Simple ping */
+router.get('/ping', (_req, res) => res.json({ ok: true }));
 
-export default router
+export default router;

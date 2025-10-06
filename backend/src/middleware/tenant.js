@@ -1,29 +1,66 @@
-import Tenant from '../models/Tenant.js';
+// src/middleware/tenant.js
+import mongoose from 'mongoose'
+import Tenant from '../models/Tenant.js' // make sure this exists
 
-export async function tenantMiddleware(req, res, next) {
-  const raw = req.header('x-tenant-id');
-  if (!raw) return res.status(400).json({ error: 'Missing x-tenant-id' });
+const isObjectId = (v) => /^[0-9a-fA-F]{24}$/.test(String(v || ''))
 
-  // accept either ObjectId or slug; prefer slug for dev (e.g., "demo")
-  let tenant = null;
+/**
+ * Usage in routes:
+ *   router.get('/', withTenant, async (req, res) => {
+ *     const docs = await Model.find(req.scoped({ status: 'Open' }))
+ *     res.json(docs)
+ *   })
+ *
+ * What it sets:
+ *   req.tenantId -> string ObjectId
+ *   req.scoped(baseQuery) -> merges { tenantId } into baseQuery
+ * 
+ */
 
-  // try slug first
-  tenant = await Tenant.findOne({ slug: raw, isDeleted: { $ne: true } }).lean();
+export { withTenant as tenantMiddleware };
+export default withTenant;
 
-  // if not slug, try _id
-  if (!tenant && /^[0-9a-fA-F]{24}$/.test(raw)) {
-    tenant = await Tenant.findOne({ _id: raw, isDeleted: { $ne: true } }).lean();
+export async function withTenant(req, res, next) {
+  try {
+    // 1) Try header first
+    let tid = req.get('x-tenant-id') || req.headers['x-tenant-id']
+
+    // 2) Then token/user (if your auth middleware sets req.user)
+    if (!tid && req.user?.tenantId) tid = req.user.tenantId
+
+    // 3) Then query param fallback (?tenant=slugOrId)
+    if (!tid && req.query?.tenant) tid = req.query.tenant
+
+    if (!tid) {
+      return res.status(400).json({ error: 'Missing x-tenant-id' })
+    }
+
+    // Resolve slug/name -> _id if needed
+    let tenantId = null
+    if (isObjectId(tid)) {
+      tenantId = String(tid)
+    } else {
+      const t = await Tenant.findOne(
+        { $or: [{ slug: tid }, { name: tid }] },
+        { _id: 1 }
+      ).lean()
+      if (t) tenantId = String(t._id)
+    }
+
+    if (!tenantId) {
+      return res.status(400).json({ error: 'Invalid tenant (not found)' })
+    }
+
+    req.tenantId = tenantId
+    // Helper to always scope queries to this tenant
+    req.scoped = (base = {}) => ({
+      ...base,
+      tenantId: new mongoose.Types.ObjectId(tenantId),
+    })
+
+    next()
+  } catch (err) {
+    console.error('[withTenant] resolve error:', err)
+    res.status(500).json({ error: 'Tenant resolution failed' })
   }
-
-  // dev convenience: auto-create if missing & value looks like a slug
-  if (!tenant && !/^[0-9a-fA-F]{24}$/.test(raw)) {
-    const doc = await Tenant.create({ slug: raw, name: raw.toUpperCase() });
-    tenant = doc.toObject();
-  }
-
-  if (!tenant) return res.status(404).json({ error: 'Invalid tenant' });
-
-  req.tenantId = tenant._id;
-  req.tenant   = tenant;
-  next();
 }
