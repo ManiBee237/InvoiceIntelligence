@@ -1,102 +1,105 @@
-import express from 'express'
-import Customer from '../models/Customer.js'
+// src/routes/customers.js
+import { Router } from 'express';
+import mongoose from 'mongoose';
+import Customer from '../models/Customer.js';
+import { asyncHandler } from '../utils/asyncHandler.js';
 
-const router = express.Router()
+const r = Router();
 
-// ---------- LIST ----------
-router.get('/', async (req, res, next) => {
-  try {
-    const { q = '', limit = 500, offset = 0 } = req.query
-    const query = req.scoped({}) // tenant scoping comes from middleware
+const shape = (c) => {
+  const x = typeof c.toJSON === 'function' ? c.toJSON() : c;
+  return {
+    id: x.id || x._id?.toString(),
+    tenantId: x.tenantId,
+    name: x.name,
+    email: x.email,
+    phone: x.phone,
+    gstin: x.gstin,
+    billing: x.billing || {},
+    shipping: x.shipping || {},
+    notes: x.notes,
+    isActive: x.isActive,
+    createdAt: x.createdAt,
+    updatedAt: x.updatedAt,
+  };
+};
 
-    if (q) {
-      const rx = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')
-      Object.assign(query, { $or: [
-        { name:   rx },
-        { email:  rx },
-        { phone:  rx },
-        { code:   rx },
-      ]})
+// LIST: /api/customers?search=&page=1&limit=20
+r.get(
+  '/',
+  asyncHandler(async (req, res) => {
+    const { search = '', page = 1, limit = 20 } = req.query;
+    const p = Math.max(1, parseInt(page, 10) || 1);
+    const l = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
+
+    const q = { tenantId: req.tenantId };
+    if (search) {
+      const rx = new RegExp(String(search).trim(), 'i');
+      q.$or = [{ name: rx }, { email: rx }, { phone: rx }];
     }
 
-    const docs = await Customer.find(query)
-      .sort({ createdAt: -1 })
-      .skip(Number(offset) || 0)
-      .limit(Math.min(Number(limit) || 500, 1000))
-      .lean()
+    const [rows, total] = await Promise.all([
+      Customer.find(q).sort({ createdAt: -1 }).skip((p - 1) * l).limit(l).lean(),
+      Customer.countDocuments(q),
+    ]);
+    res.setHeader('x-total-count', String(total));
+    res.json(rows.map(shape));
+  })
+);
 
-    res.set('x-total-count', String(docs.length))
-    res.json(docs.map(({ _id, ...rest }) => ({ id: String(_id), ...rest })))
-  } catch (err) { next(err) }
-})
+// CREATE
+r.post(
+  '/',
+  asyncHandler(async (req, res) => {
+    const tenantId = req.tenantId;
 
-// helper: generate a code if none provided (simple, tenant-safe enough for demo)
-function genCode() {
-  const d = new Date()
-  const ym = `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}`
-  const rnd = Math.floor(1000 + Math.random()*9000)
-  return `CUS-${ym}-${rnd}`
-}
-
-// ---------- CREATE (idempotent) ----------
-router.post('/', async (req, res, next) => {
-  try {
-    const body   = req.body || {}
-    const name   = (body.name || '').trim()
-    const email  = (body.email || '').trim().toLowerCase() || undefined
-    const phone  = (body.phone || '').trim() || undefined
-    const address= (body.address || '').trim() || undefined
-    const codeIn = (body.code || body.id || '').trim() || undefined // accept old "id", map to "code"
-
-    if (!name) return res.status(400).json({ error: 'Name required' })
-
-    // Find an existing customer in this tenant by email OR code OR exact name
-    const existing = await Customer.findOne(req.scoped({
-      $or: [
-        ...(email ? [{ email }] : []),
-        ...(codeIn ? [{ code: codeIn }] : []),
-        { name: { $regex: `^${name}$`, $options: 'i' } },
-      ]
-    }))
-
-    if (existing) {
-      // Idempotent success: return the existing row with created:false
-      const { _id, ...rest } = existing.toObject()
-      return res.status(200).json({ created: false, id: String(_id), ...rest })
+    // ⬇️ moved inside the handler so `req` exists
+    const headerUserId = req.headers['x-user-id'];
+    const payload = { ...req.body, tenantId };
+    if (headerUserId && mongoose.Types.ObjectId.isValid(headerUserId)) {
+      payload.createdBy = headerUserId;
     }
 
-    // Create new doc (generate code if not provided)
-    const doc = await Customer.create({
-      tenantId: req.tenantId,
-      name,
-      email,
-      phone,
-      address,
-      code: codeIn || genCode(),
-      createdBy: req.userId || null,
-    })
+    const doc = await Customer.create(payload);
+    res.status(201).json(shape(doc));
+  })
+);
 
-    const { _id, ...rest } = doc.toObject()
-    res.status(201).json({ created: true, id: String(_id), ...rest })
-  } catch (err) {
-    // Handle unique index races gracefully — return existing (idempotent)
-    if (err?.code === 11000) {
-      const email = (req.body?.email || '').toLowerCase()
-      const code  = (req.body?.code || req.body?.id || '')
-      const byUnique = await Customer.findOne(req.scoped({
-        $or: [
-          ...(email ? [{ email }] : []),
-          ...(code  ? [{ code }]  : []),
-          { name: { $regex: `^${(req.body?.name||'').trim()}$`, $options: 'i' } },
-        ]
-      }))
-      if (byUnique) {
-        const { _id, ...rest } = byUnique.toObject()
-        return res.status(200).json({ created: false, id: String(_id), ...rest })
-      }
-    }
-    next(err)
-  }
-})
+// READ
+r.get(
+  '/:id',
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ error: 'Invalid id' });
+    const doc = await Customer.findOne({ _id: id, tenantId: req.tenantId }).lean();
+    if (!doc) return res.status(404).json({ error: 'Not found' });
+    res.json(shape(doc));
+  })
+);
 
-export default router
+// PATCH
+r.patch(
+  '/:id',
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ error: 'Invalid id' });
+    await Customer.updateOne({ _id: id, tenantId: req.tenantId }, { $set: req.body || {} });
+    const after = await Customer.findOne({ _id: id, tenantId: req.tenantId }).lean();
+    if (!after) return res.status(404).json({ error: 'Not found' });
+    res.json(shape(after));
+  })
+);
+
+// DELETE
+r.delete(
+  '/:id',
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ error: 'Invalid id' });
+    const ok = await Customer.deleteOne({ _id: id, tenantId: req.tenantId });
+    if (ok.deletedCount === 0) return res.status(404).json({ error: 'Not found' });
+    res.status(204).end();
+  })
+);
+
+export default r;

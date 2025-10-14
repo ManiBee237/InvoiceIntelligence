@@ -1,19 +1,47 @@
-import mongoose from 'mongoose'
-const { Schema, Types } = mongoose
+// src/models/Customer.js
+import mongoose from 'mongoose';
 
-const CustomerSchema = new Schema({
-  tenantId: { type: Types.ObjectId, required: true, index: true },
-  name:     { type: String, required: true, trim: true },
-  email:    { type: String, trim: true, lowercase: true },
-  phone:    { type: String, trim: true },
-  address:  { type: String, trim: true },
-  // use "code" for your human id like "CUS-202510-9305"
-  code:     { type: String, trim: true },
-}, { timestamps: true })
+const AddressSchema = new mongoose.Schema(
+  {
+    line1: { type: String, trim: true },
+    line2: { type: String, trim: true },
+    city:  { type: String, trim: true },
+    state: { type: String, trim: true },
+    zip:   { type: String, trim: true },
+    country: { type: String, trim: true },
+  },
+  { _id: false }
+);
 
-CustomerSchema.index({ tenantId: 1, email: 1 }, { unique: true, sparse: true })
-CustomerSchema.index({ tenantId: 1, code: 1  }, { unique: true, sparse: true })
-// If you DON'T want names unique, remove the next line:
-CustomerSchema.index({ tenantId: 1, name: 1 }, { unique: true })
+const CustomerSchema = new mongoose.Schema(
+  {
+    tenantId: { type: String, required: true, index: true },
+    name:     { type: String, required: true, trim: true },
+    email:    { type: String, trim: true, lowercase: true },
+    phone:    { type: String, trim: true },
+    gstin:    { type: String, trim: true },
+    billing:  { type: AddressSchema, default: {} },
+    shipping: { type: AddressSchema, default: {} },
+    notes:    { type: String, trim: true },
+    isActive: { type: Boolean, default: true },
+    createdBy:{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }, // <-- add
+  },
+  {
+    timestamps: true,
+    toJSON: {
+      virtuals: true,
+      transform(_doc, ret) {
+        ret.id = ret._id?.toString();
+        delete ret._id;
+        delete ret.__v;
+        return ret;
+      },
+    },
+  }
+);
 
-export default mongoose.model('Customer', CustomerSchema)
+// unique per-tenant by name; also sparse unique email per-tenant if provided
+CustomerSchema.index({ tenantId: 1, name: 1 }, { unique: true });
+CustomerSchema.index({ tenantId: 1, email: 1 }, { unique: true, partialFilterExpression: { email: { $type: 'string' } } });
+
+export default mongoose.model('Customer', CustomerSchema);

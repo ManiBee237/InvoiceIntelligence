@@ -1,9 +1,23 @@
-import mongoose from 'mongoose'
+import mongoose from 'mongoose';
 
-const TenantSchema = new mongoose.Schema({
-  name: { type: String, required: true },
-  slug: { type: String, required: true, unique: true, index: true },
-  isDeleted: { type: Boolean, default: false, index: true },
-}, { timestamps: true })
+const TenantSchema = new mongoose.Schema(
+  {
+    slug: { type: String, required: true, lowercase: true, trim: true, unique: true, index: true },
+    name: { type: String, required: true, trim: true },
+    currency: { type: String, default: 'INR' },
+    timezone: { type: String, default: 'Asia/Kolkata' },
+  },
+  {
+    timestamps: true,
+    toJSON: {
+      virtuals: true,
+      transform(_doc, ret) {
+        ret.id = ret._id?.toString();
+        delete ret._id; delete ret.__v;
+        return ret;
+      },
+    },
+  }
+);
 
-export default mongoose.model('Tenant', TenantSchema)
+export default mongoose.model('Tenant', TenantSchema);

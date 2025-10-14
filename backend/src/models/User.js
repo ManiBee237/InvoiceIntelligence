@@ -1,23 +1,27 @@
-import mongoose from 'mongoose'
-const { Schema } = mongoose
+import mongoose from 'mongoose';
 
-const UserSchema = new Schema({
-  tenantId: { type: Schema.Types.ObjectId, ref: 'Tenant', required: true, index: true },
-  email:     { type: String, required: true, lowercase: true, trim: true },
-  name:      { type: String, default: '' },
-  passwordHash: { type: String, required: true },
-  roles:        [{ type: String }],
-  isActive:     { type: Boolean, default: true },
-  lastLoginAt:  Date,
-}, { timestamps: true })
+const UserSchema = new mongoose.Schema(
+  {
+    tenantId: { type: String, required: true, index: true }, // tenant slug
+    name:     { type: String, required: true, trim: true },
+    email:    { type: String, required: true, trim: true, lowercase: true },
+    role:     { type: String, enum: ['owner','admin','staff','viewer'], default: 'staff' },
+    passwordHash: { type: String, select: false }, // store bcrypt hash
+    isActive: { type: Boolean, default: true },
+  },
+  {
+    timestamps: true,
+    toJSON: {
+      virtuals: true,
+      transform(_doc, ret) {
+        ret.id = ret._id?.toString();
+        delete ret._id; delete ret.__v; delete ret.passwordHash;
+        return ret;
+      },
+    },
+  }
+);
 
-// one email per tenant
-UserSchema.index({ tenantId: 1, email: 1 }, { unique: true })
+UserSchema.index({ tenantId: 1, email: 1 }, { unique: true });
 
-UserSchema.methods.toJSON = function () {
-  const o = this.toObject()
-  delete o.passwordHash
-  return o
-}
-
-export default mongoose.model('User', UserSchema)
+export default mongoose.model('User', UserSchema);

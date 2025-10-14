@@ -2,20 +2,32 @@ import mongoose from 'mongoose';
 
 const PaymentSchema = new mongoose.Schema(
   {
-    tenantId:   { type: mongoose.Schema.Types.ObjectId, required: true, index: true },
-    id:         { type: String, trim: true, index: true }, // PM-YYMMDD-XXXXX
-    customerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Customer', default: null, index: true },
-    customer:   { type: String, required: true, trim: true }, // denormalized name
-    invoice:    { type: String, default: '' }, // invoice number if provided
-    date:       { type: Date, required: true },
-    method:     { type: String, enum: ['UPI', 'Bank', 'Card', 'Cash'], default: 'UPI', index: true },
-    amount:     { type: Number, required: true, min: 1 },
-    isDeleted:  { type: Boolean, default: false, index: true },
+    tenantId:  { type: String, required: true, index: true },
+    invoiceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Invoice', required: true, index: true },
+
+    amount:    { type: Number, required: true, min: 0 },
+    date:      { type: Date, required: true, default: () => new Date() },
+    method:    { type: String, trim: true }, // e.g. UPI, Card, Cash, Bank Transfer
+    notes:     { type: String, trim: true },
   },
-  { timestamps: true }
+  {
+    timestamps: true,
+    toJSON: {
+      virtuals: true,
+      transform(_doc, ret) {
+        ret.id = ret._id?.toString();
+        delete ret._id;
+        delete ret.__v;
+        if (ret.date instanceof Date) {
+          ret.date = ret.date.toISOString().slice(0, 10);
+        }
+        return ret;
+      },
+    },
+  }
 );
 
-PaymentSchema.index({ tenantId: 1, id: 1 }, { unique: true, sparse: true });
-PaymentSchema.index({ tenantId: 1, date: 1 });
+// For fast queries by tenant + invoice
+PaymentSchema.index({ tenantId: 1, invoiceId: 1 });
 
 export default mongoose.model('Payment', PaymentSchema);

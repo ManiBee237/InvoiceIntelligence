@@ -1,263 +1,259 @@
 // src/pages/Bills.jsx
-import React, { useMemo, useState, useEffect } from 'react'
-import Page from '../components/Page'
-import { TableWrap, DataTable } from '../components/ui/Table'
-import { Btn, BtnGhost, BtnDanger } from '../components/ui/Buttons'
-import SweetAlert from '../components/ui/SweetAlert'
-import { notify } from '../components/ui/Toast'
-import { inr, dd } from '../data/store'
-import { api } from '../lib/api'
-import VendorSelect from '../components/VendorSelect'
+import React, { useEffect, useMemo, useState } from 'react';
+import Page from '../components/Page';
+import { TableWrap, DataTable } from '../components/ui/Table';
+import { Btn, BtnGhost, BtnDanger } from '../components/ui/Buttons';
+import SweetAlert from '../components/ui/SweetAlert';
+import { notify } from '../components/ui/Toast';
+import { inr, dd } from '../data/store';
+import { api } from '../lib/api';
 
-const STATUS = ['All', 'Open', 'Overdue', 'Paid']
+const STATUSES = ['draft', 'open', 'approved', 'paid', 'void'];
+const isId = (s) => typeof s === 'string' && /^[a-f\d]{24}$/i.test(s);
+const today = () => new Date().toISOString().slice(0, 10);
 
-/* ------------------------ Helpers ------------------------ */
-const isObjectId = (s) => /^[0-9a-fA-F]{24}$/.test(String(s || ''))
-const genBillId = () => {
-  const d = new Date()
-  const y = String(d.getFullYear()).slice(-2)
-  const m = String(d.getMonth() + 1).padStart(2, '0')
-  const day = String(d.getDate()).padStart(2, '0')
-  const rnd = Math.random().toString(36).slice(2, 9).toUpperCase() // 7 chars
-  return `BILL-${y}${m}${day}-${rnd}`
-}
-function validateBill(values) {
-  const e = {}
-  if (!values.vendor) e.vendor = 'Vendor required'
-  if (values.amount == null || Number(values.amount) <= 0) e.amount = 'Amount must be > 0'
-  if (!values.date || Number.isNaN(Date.parse(values.date))) e.date = 'Valid bill date required'
-  if (!values.due  || Number.isNaN(Date.parse(values.due)))  e.due  = 'Valid due date required'
-  if (!values.status || !['Open','Overdue','Paid'].includes(values.status)) e.status = 'Choose status'
-  return e
-}
+/* ---------- API ---------- */
+const listBills = async () => api('/api/bills');
+const createBill = async (body) => api('/api/bills', { method: 'POST', body });
+const updateBill = async (id, body) => api(`/api/bills/${encodeURIComponent(id)}`, { method: 'PUT', body });
+const deleteBill = async (id) => api(`/api/bills/${encodeURIComponent(id)}`, { method: 'DELETE' });
+const listVendors = async () => api('/api/vendors');
 
-/* -------------------------- API -------------------------- */
-const listBills  = async (query='') => api(`/api/bills${query}`)
-const createBill = async (body) => api('/api/bills', { method: 'POST', body })
-const updateBill = async (id, body) => api(`/api/bills/${encodeURIComponent(id)}`, { method: 'PUT', body })
-const deleteBill = async (id) => api(`/api/bills/${encodeURIComponent(id)}`, { method: 'DELETE' })
+/* ---------- Helpers ---------- */
+const computeLine = (l) => {
+  const qty  = Number(l?.qty ?? 0);
+  const rate = Number(l?.rate ?? 0);
+  const amount = (Number.isFinite(qty) ? qty : 0) * (Number.isFinite(rate) ? rate : 0);
+  return { description: String(l?.description ?? ''), qty: Number.isFinite(qty) ? qty : 0, rate: Number.isFinite(rate) ? rate : 0, amount };
+};
+const computeTotals = (lines, tax) => {
+  const norm = (Array.isArray(lines) ? lines : []).map(computeLine);
+  const subtotal = norm.reduce((s, x) => s + (Number.isFinite(x.amount) ? x.amount : 0), 0);
+  const taxNum = Number(tax ?? 0);
+  return {
+    lines: norm,
+    subtotal,
+    tax: Number.isFinite(taxNum) ? taxNum : 0,
+    total: subtotal + (Number.isFinite(taxNum) ? taxNum : 0),
+  };
+};
+const OPEN_DEFAULT = {
+  id: '',
+  vendorId: '',          // dropdown
+  vendorName: '',        // free text (fallback if no dropdown)
+  billNo: '',
+  billDate: today(),
+  dueDate: '',
+  lines: [{ description: '', qty: 1, rate: 0 }],
+  tax: 0,
+  subtotal: 0,
+  total: 0,
+  status: 'open',
+};
 
 export default function Bills() {
-  const [rows, setRows] = useState([])
-  const [q, setQ] = useState('')
-  const [status, setStatus] = useState('All')
+  const [rows, setRows] = useState([]);
+  const [vendors, setVendors] = useState([]);
 
-  // modals
-  const [confirmOpen, setConfirmOpen] = useState(false)
-  const [target, setTarget] = useState(null)
-  const [formOpen, setFormOpen] = useState(false)
-  const [formInitial, setFormInitial] = useState(null)
-  const [formErrors, setFormErrors] = useState({})
+  const [q, setQ] = useState('');
+  const [formOpen, setFormOpen] = useState(false);
+  const [form, setForm] = useState(OPEN_DEFAULT);
+  const [errors, setErrors] = useState({});
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [target, setTarget] = useState(null);
 
-  /* --- Read ?status= and #new from hash --- */
+  /* ---------- Load ---------- */
   useEffect(() => {
-    const handle = () => {
-      const [, after=''] = window.location.hash.split('#/')
-      const qs = ('#' + after).split('?')[1] || ''
-      const params = new URLSearchParams(qs)
-      const s = params.get('status')
-      if (s && STATUS.includes(s)) setStatus(s)
-      if (window.location.hash.split('#').includes('new')) openCreate()
-    }
-    handle()
-    window.addEventListener('hashchange', handle)
-    return () => window.removeEventListener('hashchange', handle)
-  }, [])
-
-  /* --------------------------- Load --------------------------- */
-  useEffect(() => {
-    let alive = true
-    ;(async () => {
+    (async () => {
       try {
-        const qs = new URLSearchParams()
-        if (q.trim()) qs.set('q', q.trim())
-        if (status !== 'All') qs.set('status', status)
-        const data = await listBills(qs.toString() ? `?${qs}` : '')
-        if (alive) setRows(Array.isArray(data) ? data : [])
+        const [b, v] = await Promise.all([listBills(), listVendors().catch(() => [])]);
+        setRows(Array.isArray(b) ? b : []);
+        setVendors(Array.isArray(v) ? v : []);
       } catch (e) {
-        console.error(e)
-        notify.error('Failed to load bills', e.message || 'Try again')
+        console.error(e);
+        notify.error('Failed to load bills', e.message || 'Try again');
       }
-    })()
-    return () => { alive = false }
-  }, [q, status])
+    })();
+  }, []);
 
-  /* ------------------------- Filtering ------------------------ */
+  /* ---------- Derived totals live ---------- */
+  const liveTotals = useMemo(() => computeTotals(form.lines, form.tax), [form.lines, form.tax]);
+
+  /* ---------- Filter ---------- */
   const filtered = useMemo(() => {
-    let list = rows
-    if (q.trim()) {
-      const s = q.toLowerCase()
-      list = list.filter(r =>
-        (r.vendor || '').toLowerCase().includes(s) ||
-        (r.id || '').toLowerCase().includes(s)
-      )
-    }
-    if (status !== 'All') list = list.filter(r => r.status === status)
-    return list
-  }, [rows, q, status])
+    const s = q.trim().toLowerCase();
+    if (!s) return rows;
+    return rows.filter((r) =>
+      (r.billNo || '').toLowerCase().includes(s) ||
+      (r.vendorName || '').toLowerCase().includes(s) ||
+      (r.status || '').toLowerCase().includes(s)
+    );
+  }, [rows, q]);
 
-  /* --------------------------- CRUD --------------------------- */
-  const openDelete = (row) => { setTarget(row); setConfirmOpen(true) }
-  const confirmDelete = async () => {
-    const id = target?.id || target?._id
-    if (!id) return setConfirmOpen(false)
-    const prev = rows
-    setRows(rows.filter(r => (r.id || r._id) !== id))
-    setConfirmOpen(false); setTarget(null)
-    try {
-      await deleteBill(id)
-      notify.error('Bill deleted', `Removed ${id}`)
-    } catch (e) {
-      setRows(prev)
-      notify.error('Delete failed', e.message || 'Try again')
-    }
-  }
-
+  /* ---------- CRUD ---------- */
   const openCreate = () => {
-    setFormInitial({
-      id: '', // let backend assign; if required, we'll fallback in submit
-      vendor: '',
-      vendorId: '',
-      date: new Date().toISOString().slice(0,10),
-      due: '',
-      amount: '',
-      status: 'Open',
-    })
-    setFormErrors({})
-    setFormOpen(true)
-  }
+    setForm({ ...OPEN_DEFAULT });
+    setErrors({});
+    setFormOpen(true);
+  };
 
   const openEdit = (row) => {
-    const asDate = (v) => {
-      if (!v) return ''
-      const d = new Date(v)
-      return Number.isNaN(d.getTime()) ? '' : d.toISOString().slice(0,10)
+    setForm({
+      id: row.id || row._id || '',
+      vendorId: row.vendorId || '',
+      vendorName: row.vendorName || '',
+      billNo: row.billNo || '',
+      billDate: row.billDate || today(),
+      dueDate: row.dueDate || '',
+      lines: Array.isArray(row.lines) && row.lines.length ? row.lines.map((l) => ({
+        description: l.description || '',
+        qty: Number(l.qty) || 0,
+        rate: Number(l.rate) || 0,
+      })) : [{ description: '', qty: 1, rate: 0 }],
+      tax: Number(row.tax) || 0,
+      ...computeTotals(row.lines, row.tax),
+      status: String(row.status || 'open').toLowerCase(),
+    });
+    setErrors({});
+    setFormOpen(true);
+  };
+
+  const openDelete = (row) => {
+    setTarget(row);
+    setConfirmOpen(true);
+  };
+
+  const confirmDelete = async () => {
+    const id = target?.id || target?._id;
+    setConfirmOpen(false);
+    setTarget(null);
+    if (!id) return;
+    const prev = rows;
+    setRows(rows.filter((r) => (r.id || r._id) !== id));
+    try {
+      await deleteBill(id);
+      notify.error('Bill deleted', `Removed ${id}`);
+    } catch (e) {
+      setRows(prev);
+      notify.error('Delete failed', e.message || 'Try again');
     }
-    setFormInitial({
-      ...row,
-      date: asDate(row.date),
-      due:  asDate(row.due),
-    })
-    setFormErrors({})
-    setFormOpen(true)
-  }
+  };
 
+  /* ---------- Validation ---------- */
+  const validate = () => {
+    const e = {};
+    const hasVendor =
+      (form.vendorId && isId(form.vendorId)) ||
+      (form.vendorName && String(form.vendorName).trim().length > 0);
+    if (!hasVendor) e.vendor = 'Vendor is required (pick from list or type a name)';
+    if (!form.billDate || Number.isNaN(Date.parse(form.billDate))) e.billDate = 'Valid date required';
+    const ln = form.lines?.[0];
+    if (!ln?.description) e.description = 'Description required';
+    if (!(Number(ln?.qty) > 0)) e.qty = 'Qty must be > 0';
+    if (!(Number(ln?.rate) > 0)) e.rate = 'Rate must be > 0';
+    if (!STATUSES.includes(String(form.status || '').toLowerCase())) e.status = 'Choose status';
+    setErrors(e);
+    return Object.keys(e).length === 0;
+  };
+
+  /* ---------- Submit ---------- */
   const submitForm = async () => {
-    const errors = validateBill(formInitial || {})
-    setFormErrors(errors)
-    if (Object.keys(errors).length) return
+    if (!validate()) {
+      notify.error('Please fix the highlighted fields');
+      return;
+    }
 
-    const isEdit = !!rows.find(r => (r.id || r._id) === (formInitial.id || formInitial._id))
-    let payload = { ...formInitial }
+    // Build vendor field (id preferred, else name)
+    const vendorPayload =
+      form.vendorId && isId(form.vendorId)
+        ? { vendorId: form.vendorId }
+        : { vendorName: String(form.vendorName || '').trim() };
 
-    // Only send a valid ObjectId for vendorId
-    if (!isObjectId(payload.vendorId)) delete payload.vendorId
+    // Build payload
+    const { lines, subtotal, tax, total } = liveTotals;
+    const payload = {
+      ...vendorPayload,
+      billNo: form.billNo || '',
+      billDate: form.billDate || today(),
+      dueDate: form.dueDate || undefined,
+      lines: lines.map(({ description, qty, rate }) => ({ description, qty, rate })),
+      tax,
+      status: String(form.status || 'open').toLowerCase(),
+    };
 
-    // On create, prefer letting backend assign the ID
-    if (!isEdit && (!payload.id || !payload.id.trim())) delete payload.id
+    const isEdit = !!form.id;
+    const p = isEdit ? updateBill(form.id, payload) : createBill(payload);
 
-    const send = () =>
-      isEdit
-        ? updateBill(payload.id || payload._id, payload)
-        : createBill(payload)
-
-    notify.promise(send(), {
-      pending: { title: isEdit ? 'Saving…' : 'Recording bill…', message: 'Please wait' },
-      success: (res) => ({ title: isEdit ? 'Updated ✅' : 'Created 🎉', message: `${res.vendor} • ${inr(Number(res.amount)||0)}` }),
-      error:   (err) => ({ title: 'Failed ❌', message: err?.message || '' }),
-    })
+    notify.promise(p, {
+      pending: { title: isEdit ? 'Saving changes…' : 'Creating bill…', message: 'Please wait' },
+      success: (res) => ({ title: isEdit ? 'Bill updated ✅' : 'Bill created 🎉', message: res.billNo }),
+      error: (err) => ({ title: 'Failed ❌', message: err?.message || 'Try again' }),
+    });
 
     try {
-      const res = await send()
-      const key = res.id || res._id
-      const idx = rows.findIndex(r => (r.id || r._id) === key)
-      const next = [...rows]
-      if (idx >= 0) next[idx] = res; else next.unshift(res)
-      setRows(next)
-      setFormOpen(false)
+      const res = await p;
+      const id = res.id || res._id;
+      const existingIdx = rows.findIndex((r) => (r.id || r._id) === id);
+      const next = [...rows];
+      if (existingIdx >= 0) next[existingIdx] = res;
+      else next.unshift(res);
+      setRows(next);
+      setFormOpen(false);
     } catch (e) {
-      const msg = String(e?.message || '').toLowerCase()
-
-      // If server *requires* an ID, or we hit duplicate, fallback to a strong client ID and retry once
-      const needsId = e.status === 400 && (msg.includes('id') || msg.includes('required'))
-      const dup     = e.status === 409 || msg.includes('exists') || msg.includes('duplicate')
-      if (!isEdit && (needsId || dup)) {
-        try {
-          payload = { ...payload, id: genBillId() }
-          setFormInitial(payload)
-          const res2 = await (isEdit ? updateBill(payload.id || payload._id, payload) : createBill(payload))
-          const key2 = res2.id || res2._id
-          const idx2 = rows.findIndex(r => (r.id || r._id) === key2)
-          const next2 = [...rows]
-          if (idx2 >= 0) next2[idx2] = res2; else next2.unshift(res2)
-          setRows(next2)
-          setFormOpen(false)
-          notify.info('Assigned Bill ID', payload.id)
-          return
-        } catch (e2) {
-          console.error(e2)
-        }
-      }
-
-      console.error(e)
+      console.error(e);
     }
-  }
+  };
 
-  const isEditing =
-    !!(formInitial?.id || formInitial?._id) &&
-    rows.some(r => (r.id || r._id) === (formInitial?.id || formInitial?._id))
-
-  /* ----------------------------- UI ---------------------------- */
+  /* ---------- UI ---------- */
   return (
-    <Page title="Bills" subtitle="Track and manage payables" actions={<Btn onClick={openCreate}>+ New Bill</Btn>}>
+    <Page
+      title="Bills"
+      subtitle="Track vendor bills and payables."
+      actions={<Btn onClick={openCreate}>+ Add Bill</Btn>}
+    >
       {/* Filters */}
-      <div className="flex flex-wrap items-center gap-3">
+      <div className="flex flex-wrap items-center gap-3 mb-3">
         <input
           className="w-72 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-400"
-          placeholder="Search vendor or bill id"
+          placeholder="Search bill #, vendor, status"
           value={q}
           onChange={(e) => setQ(e.target.value)}
         />
-        <select
-          className="w-44 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-400"
-          value={status}
-          onChange={(e) => setStatus(e.target.value)}
-        >
-          {STATUS.map(s => <option key={s} value={s}>{s}</option>)}
-        </select>
       </div>
 
       {/* Table */}
       <TableWrap>
         <DataTable
           empty="No bills"
-          initialSort={{ key: 'due', dir: 'asc' }}
+          initialSort={{ key: 'billDate', dir: 'desc' }}
           columns={[
-            { key: 'id', header: 'ID', render: (r)=> r.id || r._id },
-            { key: 'vendor', header: 'Vendor' },
-            { key: 'date', header: 'Bill Date', render: (r)=> dd(r.date) },
-            { key: 'due', header: 'Due', render: (r)=> dd(r.due) },
-            { key: 'amount', header: 'Amount', align: 'right', render: (r)=> inr(Number(r.amount)||0) },
-            {
-              key: 'status', header: 'Status',
-              render: (r)=>(
+            { key: 'billNo', header: 'Bill #' },
+            { key: 'vendorName', header: 'Vendor' },
+            { key: 'billDate', header: 'Date', render: (r) => dd(r.billDate) },
+            { key: 'dueDate', header: 'Due', render: (r) => dd(r.dueDate) },
+            { key: 'status', header: 'Status',
+              render: (r) => (
                 <span className={
                   'inline-flex items-center rounded-full px-2 py-0.5 text-xs border ' +
-                  (r.status === 'Paid'
+                  (r.status === 'paid'
                     ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
-                    : r.status === 'Overdue'
-                    ? 'bg-rose-50 text-rose-700 border-rose-200'
-                    : 'bg-amber-50 text-amber-700 border-amber-200')
+                    : r.status === 'approved'
+                    ? 'bg-amber-50 text-amber-700 border-amber-200'
+                    : r.status === 'void'
+                    ? 'bg-slate-50 text-slate-700 border-slate-200'
+                    : 'bg-sky-50 text-sky-700 border-sky-200')
                 }>
                   {r.status}
                 </span>
               )
             },
-            { key: '_actions', header: 'Actions', align: 'right',
-              render: (r)=>(
+            { key: 'total', header: 'Total', align: 'right', render: (r) => inr(Number(r.total) || 0) },
+            {
+              key: '_actions', header: 'Actions', align: 'right',
+              render: (r) => (
                 <div className="flex justify-end gap-2">
-                  <BtnGhost onClick={()=>openEdit(r)}>Edit</BtnGhost>
-                  <BtnDanger onClick={()=>openDelete(r)}>Delete</BtnDanger>
+                  <BtnGhost onClick={() => openEdit(r)}>Edit</BtnGhost>
+                  <BtnDanger onClick={() => openDelete(r)}>Delete</BtnDanger>
                 </div>
               )
             },
@@ -266,97 +262,161 @@ export default function Bills() {
         />
       </TableWrap>
 
-      {/* SweetAlert: Delete */}
+      {/* Delete confirm */}
       <SweetAlert
         open={confirmOpen}
         title="Delete bill?"
-        message={target ? `This will remove ${target.id || target._id} from payables.` : ''}
+        message={target ? `This will permanently remove ${target.billNo || target.id}.` : ''}
         confirmText="Delete"
         cancelText="Cancel"
         tone="rose"
         onConfirm={confirmDelete}
-        onCancel={()=>setConfirmOpen(false)}
+        onCancel={() => setConfirmOpen(false)}
       />
 
-      {/* SweetAlert: Create/Edit form */}
+      {/* Create/Edit dialog */}
       <SweetAlert
         open={formOpen}
-        title={isEditing ? 'Edit bill' : 'New bill'}
+        title={form.id ? 'Edit bill' : 'New bill'}
         message="Fill the required fields below."
-        confirmText={isEditing ? 'Save' : 'Create'}
+        confirmText={form.id ? 'Save' : 'Create'}
         cancelText="Cancel"
         tone="emerald"
         onConfirm={submitForm}
-        onCancel={()=>setFormOpen(false)}
+        onCancel={() => setFormOpen(false)}
       >
-        {formInitial && (
+        {form && (
           <div className="grid grid-cols-2 gap-3">
-            <Field label="Bill ID">
+            {/* Vendor dropdown OR type name */}
+            <Field label="Vendor" error={errors.vendor}>
+              <div className="flex gap-2">
+                <select
+                  className={inClass(errors.vendor)}
+                  value={form.vendorId ?? ''}
+                  onChange={(e) => setForm({ ...form, vendorId: e.target.value, vendorName: '' })}
+                >
+                  <option value="">— Select —</option>
+                  {vendors.map((v) => (
+                    <option key={v.id || v._id} value={v.id || v._id}>
+                      {v.name}
+                    </option>
+                  ))}
+                </select>
+                <input
+                  className={inClass(errors.vendor)}
+                  placeholder="Or type new vendor name"
+                  value={form.vendorName ?? ''}
+                  onChange={(e) => setForm({ ...form, vendorName: e.target.value, vendorId: '' })}
+                />
+              </div>
+            </Field>
+
+            <Field label="Bill #" >
               <input
                 className={inClass()}
-                value={formInitial.id || ''}
-                readOnly={true /* server assigns or we fallback in submit */}
-                placeholder="(auto)"
+                value={form.billNo ?? ''}
+                onChange={(e) => setForm({ ...form, billNo: e.target.value })}
               />
             </Field>
 
-            <Field label="Vendor" error={formErrors.vendor}>
-              <VendorSelect
-                initialQuery={formInitial.vendor || ''}
-                onPick={(v) => {
-                  setFormInitial({
-                    ...formInitial,
-                    vendor: v.name,
-                    vendorId: v._id, // MUST be ObjectId string
-                  })
+            <Field label="Bill date" error={errors.billDate}>
+              <input
+                type="date"
+                className={inClass(errors.billDate)}
+                value={form.billDate ?? today()}
+                onChange={(e) => setForm({ ...form, billDate: e.target.value || today() })}
+              />
+            </Field>
+
+            <Field label="Due date">
+              <input
+                type="date"
+                className={inClass()}
+                value={form.dueDate ?? ''}
+                onChange={(e) => setForm({ ...form, dueDate: e.target.value })}
+              />
+            </Field>
+
+            {/* One editable line (simple); extend to multiple if needed */}
+            <Field label="Line description" error={errors.description}>
+              <input
+                className={inClass(errors.description)}
+                value={form.lines?.[0]?.description ?? ''}
+                onChange={(e) => {
+                  const lines = [...(form.lines || [{ description: '', qty: 1, rate: 0 }])];
+                  lines[0] = { ...(lines[0] || {}), description: e.target.value };
+                  setForm({ ...form, lines });
                 }}
               />
             </Field>
 
-            <Field label="Bill date" error={formErrors.date}>
-              <input
-                type="date"
-                className={inClass(formErrors.date)}
-                value={formInitial.date || ''}
-                onChange={(e)=>setFormInitial({ ...formInitial, date: e.target.value })}
-              />
-            </Field>
-            <Field label="Due date" error={formErrors.due}>
-              <input
-                type="date"
-                className={inClass(formErrors.due)}
-                value={formInitial.due || ''}
-                onChange={(e)=>setFormInitial({ ...formInitial, due: e.target.value })}
-              />
-            </Field>
-
-            <Field label="Amount (₹)" error={formErrors.amount}>
+            <Field label="Qty" error={errors.qty}>
               <input
                 type="number"
-                className={inClass(formErrors.amount)}
-                value={formInitial.amount}
-                onChange={(e)=>setFormInitial({ ...formInitial, amount: Number(e.target.value) })}
+                className={inClass(errors.qty)}
+                value={form.lines?.[0]?.qty ?? 1}
+                onChange={(e) => {
+                  const v = Number(e.target.value);
+                  const lines = [...(form.lines || [{ description: '', qty: 1, rate: 0 }])];
+                  lines[0] = { ...(lines[0] || {}), qty: Number.isFinite(v) ? v : 1 };
+                  setForm({ ...form, lines });
+                }}
               />
             </Field>
 
-            <Field label="Status" error={formErrors.status}>
+            <Field label="Rate (₹)" error={errors.rate}>
+              <input
+                type="number"
+                className={inClass(errors.rate)}
+                value={form.lines?.[0]?.rate ?? 0}
+                onChange={(e) => {
+                  const v = Number(e.target.value);
+                  const lines = [...(form.lines || [{ description: '', qty: 1, rate: 0 }])];
+                  lines[0] = { ...(lines[0] || {}), rate: Number.isFinite(v) ? v : 0 };
+                  setForm({ ...form, lines });
+                }}
+              />
+            </Field>
+
+            <Field label="Tax (₹)">
+              <input
+                type="number"
+                className={inClass()}
+                value={form.tax ?? 0}
+                onChange={(e) => {
+                  const v = Number(e.target.value);
+                  setForm({ ...form, tax: Number.isFinite(v) ? v : 0 });
+                }}
+              />
+            </Field>
+
+            <Field label="Status" error={errors.status}>
               <select
-                className={inClass(formErrors.status)}
-                value={formInitial.status}
-                onChange={(e)=>setFormInitial({ ...formInitial, status: e.target.value })}
+                className={inClass(errors.status)}
+                value={(form.status ?? 'open').toLowerCase()}
+                onChange={(e) => setForm({ ...form, status: e.target.value.toLowerCase() })}
               >
-                <option>Open</option>
-                <option>Overdue</option>
-                <option>Paid</option>
+                {STATUSES.map((s) => (
+                  <option key={s} value={s}>{s}</option>
+                ))}
               </select>
+            </Field>
+
+            {/* Display totals (read-only) */}
+            <Field label="Subtotal (auto)">
+              <input className={inClass()} value={inr(liveTotals.subtotal)} readOnly />
+            </Field>
+            <Field label="Total (auto)">
+              <input className={inClass()} value={inr(liveTotals.total)} readOnly />
             </Field>
           </div>
         )}
       </SweetAlert>
     </Page>
-  )
+  );
 }
 
+/* ---------- Small UI helpers ---------- */
 function Field({ label, error, children }) {
   return (
     <label className="block">
@@ -364,12 +424,11 @@ function Field({ label, error, children }) {
       {children}
       {error && <div className="mt-1 text-[11px] text-rose-600">{error}</div>}
     </label>
-  )
+  );
 }
-function inClass(err){
+function inClass(err) {
   return [
     'w-full rounded-lg border px-3 py-2 text-sm outline-none',
-    err ? 'border-rose-300 focus:ring-2 focus:ring-rose-300'
-        : 'border-slate-300 focus:ring-2 focus:ring-emerald-400'
-  ].join(' ')
+    err ? 'border-rose-300 focus:ring-2 focus:ring-rose-300' : 'border-slate-300 focus:ring-2 focus:ring-emerald-400',
+  ].join(' ');
 }

@@ -1,84 +1,80 @@
-// backend/src/routes/vendors.js
-import { Router } from "express";
-import mongoose from "mongoose";
-import Vendor from "../models/Vendor.js";
+import { Router } from 'express';
+import mongoose from 'mongoose';
+import Vendor from '../models/Vendor.js';
+import { asyncHandler } from '../utils/asyncHandler.js';
 
-const router = Router();
-const dup = (e) => e && e.code === 11000;
+const r = Router();
 
-const toUI = (doc={}) => ({
-  _id: String(doc._id || ""),
-  id: doc.code || String(doc._id || ""),
-  name: doc.name || "",
-  email: doc.email || "",
-  phone: doc.phone || "",
-  address: doc.address || "",
-  gstin: doc.gstin || "",
-});
-const fromUI = (b={}) => ({
-  code: b.id || undefined,
-  name: b.name,
-  email: b.email,
-  phone: b.phone,
-  address: b.address,
-  gstin: b.gstin,
+const shape = (v) => (typeof v.toJSON === 'function' ? v.toJSON() : {
+  id: v._id?.toString?.(),
+  tenantId: v.tenantId,
+  name: v.name, email: v.email, phone: v.phone, gstin: v.gstin,
+  billing: v.billing || {}, shipping: v.shipping || {},
+  notes: v.notes, isActive: v.isActive,
+  createdAt: v.createdAt, updatedAt: v.updatedAt,
 });
 
-// LIST ?q=
-router.get("/", async (req,res,next)=>{
-  try{
-    const q = (req.query.q || "").trim();
-    const filter = { tenantId: req.tenantId };
-    if (q) {
-      filter.$or = [
-        { name: { $regex: q, $options: "i" } },
-        { code: { $regex: q, $options: "i" } },
-        { gstin:{ $regex: q, $options: "i" } },
-      ];
-    }
-    const docs = await Vendor.find(filter).sort({ name: 1 }).limit(500).lean();
-    res.json(docs.map(toUI));
-  }catch(e){ next(e); }
-});
+// LIST /api/vendors?search=&page=1&limit=20&active=true
+r.get('/', asyncHandler(async (req, res) => {
+  const { search = '', page = 1, limit = 20, active } = req.query;
+  const p = Math.max(1, parseInt(page,10) || 1);
+  const l = Math.min(100, Math.max(1, parseInt(limit,10) || 20));
+  const q = { tenantId: req.tenantId };
+  if (search) {
+    const rx = new RegExp(String(search).trim(), 'i');
+    q.$or = [{ name: rx }, { email: rx }, { phone: rx }, { gstin: rx }];
+  }
+  if (active === 'true') q.isActive = true;
+  if (active === 'false') q.isActive = false;
+
+  const [rows, total] = await Promise.all([
+    Vendor.find(q).sort({ createdAt: -1 }).skip((p-1)*l).limit(l).lean(),
+    Vendor.countDocuments(q),
+  ]);
+  res.setHeader('x-total-count', String(total));
+  res.json(rows.map(shape));
+}));
 
 // CREATE
-router.post("/", async (req,res,next)=>{
-  try{
-    const doc = await Vendor.create({ ...fromUI(req.body||{}), tenantId: req.tenantId });
-    res.status(201).json(toUI(doc.toObject()));
-  }catch(e){
-    if (dup(e)) return res.status(409).json({ error: "Vendor ID already exists" });
-    next(e);
+r.post('/', asyncHandler(async (req, res) => {
+  const payload = { ...req.body, tenantId: req.tenantId };
+  const headerUserId = req.headers['x-user-id'];
+  if (headerUserId && mongoose.Types.ObjectId.isValid(headerUserId)) {
+    payload.createdBy = headerUserId;
   }
-});
-
-// UPDATE (by _id or code)
-router.put("/:id", async (req,res,next)=>{
-  try{
-    const { id } = req.params;
-    const match = mongoose.isValidObjectId(id)
-      ? { _id: id, tenantId: req.tenantId }
-      : { code: id, tenantId: req.tenantId };
-    const updated = await Vendor.findOneAndUpdate(match, { $set: fromUI(req.body||{}) }, { new:true, lean:true });
-    if (!updated) return res.status(404).json({ error: "Vendor not found" });
-    res.json(toUI(updated));
-  }catch(e){
-    if (dup(e)) return res.status(409).json({ error: "Vendor ID already exists" });
-    next(e);
+  if (!payload.name || !String(payload.name).trim()) {
+    return res.status(422).json({ error: 'name required' });
   }
-});
+  const doc = await Vendor.create(payload);
+  res.status(201).json(shape(doc));
+}));
 
-// DELETE (by _id or code)
-router.delete("/:id", async (req,res,next)=>{
-  try{
-    const { id } = req.params;
-    const match = mongoose.isValidObjectId(id)
-      ? { _id: id, tenantId: req.tenantId }
-      : { code: id, tenantId: req.tenantId };
-    const ok = await Vendor.findOneAndDelete(match).lean();
-    if (!ok) return res.status(404).json({ error: "Vendor not found" });
-    res.json({ ok: true });
-  }catch(e){ next(e); }
-});
+// READ
+r.get('/:id', asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ error: 'Invalid id' });
+  const doc = await Vendor.findOne({ _id: id, tenantId: req.tenantId }).lean();
+  if (!doc) return res.status(404).json({ error: 'Not found' });
+  res.json(shape(doc));
+}));
 
-export default router;
+// PATCH
+r.patch('/:id', asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ error: 'Invalid id' });
+  await Vendor.updateOne({ _id: id, tenantId: req.tenantId }, { $set: req.body || {} });
+  const after = await Vendor.findOne({ _id: id, tenantId: req.tenantId }).lean();
+  if (!after) return res.status(404).json({ error: 'Not found' });
+  res.json(shape(after));
+}));
+
+// DELETE
+r.delete('/:id', asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ error: 'Invalid id' });
+  const ok = await Vendor.deleteOne({ _id: id, tenantId: req.tenantId });
+  if (ok.deletedCount === 0) return res.status(404).json({ error: 'Not found' });
+  res.status(204).end();
+}));
+
+export default r;

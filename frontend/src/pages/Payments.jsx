@@ -9,11 +9,12 @@ import { inr, dd } from '../data/store'
 import { api } from '../lib/api'
 
 const METHODS = ['All', 'UPI', 'Bank', 'Card', 'Cash']
+const isId = (s) => typeof s === 'string' && /^[a-f\d]{24}$/i.test(s)
 
 /* --------------------------------- Validate --------------------------------- */
 function validatePayment(values) {
   const errors = {}
-  if (!values.customer || String(values.customer).trim() === '') errors.customer = 'Customer is required'
+  // We only truly need invoice (id or number), amount, date, method
   if (!values.invoice || String(values.invoice).trim() === '') errors.invoice = 'Invoice is required'
   if (values.amount == null || Number(values.amount) < 1) errors.amount = 'Amount must be ≥ 1'
   if (!values.date || Number.isNaN(Date.parse(values.date))) errors.date = 'Valid date required'
@@ -23,8 +24,8 @@ function validatePayment(values) {
 
 // API helpers
 const fetchPayments = async () => api('/api/payments?limit=500')
+const fetchInvoices = async () => api('/api/invoices')
 const createPayment = async (body) => api('/api/payments', { method: 'POST', body })
-const updatePayment = async (id, body) => api(`/api/payments/${id}`, { method: 'PUT', body })
 const deletePayment = async (id) => api(`/api/payments/${id}`, { method: 'DELETE' })
 
 export default function Payments() {
@@ -39,12 +40,32 @@ export default function Payments() {
   const [formInitial, setFormInitial] = useState(null)
   const [formErrors, setFormErrors] = useState({})
 
+  // cache invoices for joins (invoiceId -> {invoiceNo, customerName})
+  const [invoiceIndex, setInvoiceIndex] = useState({}) // map id -> meta
+
   // load data once
   useEffect(() => {
     (async () => {
       try {
-        const data = await fetchPayments()
-        setRows(Array.isArray(data) ? data : [])
+        const [inv, pay] = await Promise.all([fetchInvoices(), fetchPayments()])
+        const idx = Object.create(null)
+        for (const i of Array.isArray(inv) ? inv : []) {
+          const id = i.id || i._id
+          if (id) idx[id] = { invoiceNo: i.invoiceNo || i.number, customerName: i.customerName || '' }
+        }
+        setInvoiceIndex(idx)
+
+        // enrich payments so table can show customer/invoice cols
+        const enriched = (Array.isArray(pay) ? pay : []).map(p => {
+          const id = p.invoiceId || ''
+          const meta = idx[id] || {}
+          return {
+            ...p,
+            customer: meta.customerName || p.customer || '',
+            invoice: meta.invoiceNo || p.invoice || '',
+          }
+        })
+        setRows(enriched)
       } catch (e) {
         console.error(e)
         notify.error('Failed to load payments', e.message || 'Try again')
@@ -97,15 +118,18 @@ export default function Payments() {
       id: genReceiptId(),
       date: new Date().toISOString().slice(0,10),
       method: 'UPI',
+      // Free text fields; backend only needs invoiceNo or invoiceId
       customer: '',
-      invoice: '',
+      invoice: '',     // can accept invoice number (preferred) or a 24-char id
       amount: '',
+      notes: ''
     })
     setFormErrors({})
     setFormOpen(true)
   }
 
   const openEdit = (row) => {
+    // NOTE: Backend update isn't implemented; we treat edit as re-create not supported
     setFormInitial({ ...row })
     setFormErrors({})
     setFormOpen(true)
@@ -115,27 +139,39 @@ export default function Payments() {
     const values = { ...formInitial }
     const errors = validatePayment(values || {})
     setFormErrors(errors)
-    if (Object.keys(errors).length) return
+    if (Object.keys(errors).length) {
+      notify.error('Please fix the highlighted fields')
+      return
+    }
 
-    const isEdit = !!rows.find(r => (r._id || r.id) === (values._id || values.id))
-    const promise = isEdit
-      ? updatePayment(values._id || values.id, values)
-      : createPayment(values)
+    // Build backend payload: prefer invoiceId if user pasted one, else invoiceNo
+    const trimmed = String(values.invoice || '').trim()
+    const payload = {
+      ...(isId(trimmed) ? { invoiceId: trimmed } : { invoiceNo: trimmed }),
+      amount: Number(values.amount) || 0,
+      date: values.date || new Date(),
+      method: values.method || undefined,
+      notes: values.notes || undefined,
+    }
 
-    notify.promise(promise, {
-      pending: { title: isEdit ? 'Saving changes…' : 'Recording payment…', message: 'Please wait' },
-      success: (res) => ({ title: isEdit ? 'Payment updated ✅' : 'Payment recorded 🎉', message: `${inr(res.amount)} from ${res.customer}` }),
+    const p = createPayment(payload)
+
+    notify.promise(p, {
+      pending: { title: 'Recording payment…', message: 'Please wait' },
+      success: (res) => ({ title: 'Payment recorded 🎉', message: `${inr(res.amount)} posted` }),
       error:   (err) => ({ title: 'Failed ❌', message: err?.message || 'Try again' }),
     })
 
     try {
-      const res = await promise
-      const id  = res._id || res.id
-      const idx = rows.findIndex(r => (r._id || r.id) === id)
-      let next
-      if (idx >= 0) { next = [...rows]; next[idx] = { ...next[idx], ...res } }
-      else { next = [{ ...res }, ...rows] }
-      setRows(next)
+      const res = await p
+      // Enrich with invoice meta for table view
+      const meta = invoiceIndex[res.invoiceId || ''] || {}
+      const row = {
+        ...res,
+        customer: meta.customerName || values.customer || '',
+        invoice: meta.invoiceNo || values.invoice || '',
+      }
+      setRows([row, ...rows])
       setFormOpen(false)
     } catch (err) {
       console.error(err)
@@ -206,7 +242,8 @@ export default function Payments() {
               align: 'right',
               render: (r) => (
                 <div className="flex justify-end gap-2">
-                  <BtnGhost onClick={() => openEdit(r)}>Edit</BtnGhost>
+                  {/* Edit kept for future; currently only delete supported by backend */}
+                  {/* <BtnGhost onClick={() => openEdit(r)}>Edit</BtnGhost> */}
                   <BtnDanger onClick={() => openDelete(r)}>Delete</BtnDanger>
                 </div>
               )
@@ -231,9 +268,9 @@ export default function Payments() {
       {/* SweetAlert: Create/Edit form */}
       <SweetAlert
         open={formOpen}
-        title={formInitial?.id && rows.find(r => (r.id || r._id) === formInitial.id) ? 'Edit payment' : 'New payment'}
+        title="New payment"
         message="Fill the required fields below."
-        confirmText={formInitial?.id && rows.find(r => (r.id || r._id) === formInitial.id) ? 'Save' : 'Create'}
+        confirmText="Create"
         cancelText="Cancel"
         tone="emerald"
         onConfirm={submitForm}
@@ -248,6 +285,7 @@ export default function Payments() {
                 onChange={(e)=>setFormInitial({ ...formInitial, id: e.target.value })}
               />
             </Field>
+
             <Field label="Date" error={formErrors.date}>
               <input
                 type="date"
@@ -257,16 +295,21 @@ export default function Payments() {
               />
             </Field>
 
-            <Field label="Customer" error={formErrors.customer}>
+            {/* Customer is optional (display only) */}
+            <Field label="Customer">
               <input
-                className={inClass(formErrors.customer)}
+                className={inClass()}
+                placeholder="(optional – display only)"
                 value={formInitial.customer || ''}
                 onChange={(e)=>setFormInitial({ ...formInitial, customer: e.target.value })}
               />
             </Field>
-            <Field label="Invoice #" error={formErrors.invoice}>
+
+            {/* Invoice: number (e.g., INV-...) or paste 24-char id */}
+            <Field label="Invoice # or ID" error={formErrors.invoice}>
               <input
                 className={inClass(formErrors.invoice)}
+                placeholder="e.g., INV-202510-0935 or 24-char ObjectId"
                 value={formInitial.invoice || ''}
                 onChange={(e)=>setFormInitial({ ...formInitial, invoice: e.target.value })}
               />
@@ -284,12 +327,21 @@ export default function Payments() {
                 <option>Cash</option>
               </select>
             </Field>
+
             <Field label="Amount (₹)" error={formErrors.amount}>
               <input
                 type="number"
                 className={inClass(formErrors.amount)}
                 value={formInitial.amount ?? ''}
                 onChange={(e)=>setFormInitial({ ...formInitial, amount: Number(e.target.value) })}
+              />
+            </Field>
+
+            <Field label="Notes">
+              <input
+                className={inClass()}
+                value={formInitial.notes || ''}
+                onChange={(e)=>setFormInitial({ ...formInitial, notes: e.target.value })}
               />
             </Field>
           </div>

@@ -1,31 +1,23 @@
-import axios from "axios";
+// src/api.js
+import axios from 'axios';
 
-const api = axios.create({
-  baseURL: import.meta.env.VITE_API_URL || "http://localhost:5050",
-  timeout: 10000,
+export const api = axios.create({
+  baseURL: 'http://localhost:4000',
+  withCredentials: true,
+  headers: {
+    'Content-Type': 'application/json',
+  },
 });
 
-api.interceptors.request.use((config) => {
-  const token = localStorage.getItem("token");
-  const tenant = localStorage.getItem("tenant") || "demo";
-  config.headers["X-Tenant"] = tenant;
-  if (token) config.headers.Authorization = `Bearer ${token}`;
-  return config;
-});
+// usage
+export function createProduct(tenantId, payload) {
+  return api.post('/api/products', payload, {
+    headers: { 'x-tenant-id': tenantId },
+  });
+}
 
-api.interceptors.response.use(
-  (r) => r,
-  (err) => {
-    const status = err?.response?.status;
-    if (status === 401) {
-      // token expired / missing → send user to login
-      localStorage.removeItem("token");
-      if (!location.pathname.startsWith("/login")) {
-        window.location.href = "/login";
-      }
-    }
-    return Promise.reject(err);
-  }
-);
-
-export default api;
+export function listProducts(tenantId) {
+  return api.get('/api/products', {
+    headers: { 'x-tenant-id': tenantId },
+  });
+}

@@ -1,39 +1,47 @@
 // src/models/Invoice.js
-import mongoose from 'mongoose'
+import mongoose from 'mongoose';
 
-const ItemSchema = new mongoose.Schema(
+const LineSchema = new mongoose.Schema(
   {
-    description: { type: String, trim: true },
-    qty: { type: Number, default: 1, min: 0 },
-    unitPrice: { type: Number, default: 0, min: 0 },
-    gst: { type: Number, default: 0, min: 0 }, // % (optional)
+    description: { type: String, required: true, trim: true },
+    qty:   { type: Number, required: true, min: 0 },
+    rate:  { type: Number, required: true, min: 0 },
+    amount:{ type: Number, required: true, min: 0 },
   },
   { _id: false }
-)
+);
 
-// backend/src/models/Invoice.js  (add if missing)
-const InvoiceSchema = new mongoose.Schema({
-  tenantId:     { type: mongoose.Schema.Types.ObjectId, required: true, index: true },
-  number:       { type: String, required: true, index: true }, // add unique per tenant below
-  customerId:   { type: mongoose.Schema.Types.ObjectId, ref: 'Customer' },
-  customerName: { type: String },
-  customerEmail:{ type: String },
-  date:         { type: Date, required: true },
-  dueDate:      { type: Date, required: true },
-  items: [{
-    description: String,
-    qty:        Number,
-    unitPrice:  Number,
-    gst:        Number,
-  }],
-  subTotal:     { type: Number, default: 0 },
-  taxTotal:     { type: Number, default: 0 },
-  total:        { type: Number, default: 0 },
-  balance:      { type: Number, default: 0 },
-  status:       { type: String, default: 'Open', index: true },
-  notes:        { type: String },
-}, { timestamps: true });
+// ...rest unchanged...
+const InvoiceSchema = new mongoose.Schema(
+  {
+    tenantId:   { type: String, required: true, index: true },
+    customerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Customer', required: true },
+    invoiceNo:  { type: String, required: true, trim: true },
+    invoiceDate:{ type: Date,   required: true },
+    lines:      { type: [LineSchema], default: [] },
+    subtotal:   { type: Number, required: true, min: 0 },
+    tax:        { type: Number, required: true, min: 0 },
+    total:      { type: Number, required: true, min: 0 },
+    status:     { type: String, enum: ['draft','sent','paid','void'], default: 'draft' },
+    createdBy:  { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, // <-- add
+  },
+  {
+    timestamps: true,
+    toJSON: {
+      virtuals: true,
+      transform(_doc, ret) {
+        ret.id = ret._id?.toString();
+        delete ret._id;
+        delete ret.__v;
+        if (ret.invoiceDate instanceof Date) {
+          ret.invoiceDate = ret.invoiceDate.toISOString().slice(0,10);
+        }
+        return ret;
+      },
+    },
+  }
+);
+// ...index & export unchanged...
 
-InvoiceSchema.index({ tenantId: 1, number: 1 }, { unique: true });
 
-export default mongoose.models.Invoice || mongoose.model('Invoice', InvoiceSchema);
+export default mongoose.model('Invoice', InvoiceSchema);
