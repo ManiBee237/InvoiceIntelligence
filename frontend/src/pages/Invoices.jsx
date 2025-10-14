@@ -9,40 +9,28 @@ import { inr, dd } from "../data/store";
 import { api } from "../lib/api";
 import ProductSelect from "../components/ProductSelect";
 
-const STATUS = ["All", "Open", "Overdue", "Paid"];
+/* ------------------------------ constants ------------------------------ */
+const STATUS_FILTER = ["All", "Open", "Overdue", "Paid"]; // top filter
+const STATUS_OPTS = [
+  { value: "open", label: "Open" },
+  { value: "paid", label: "Paid" },
+  { value: "sent", label: "Sent" },
+  { value: "draft", label: "Draft" },
+  { value: "void", label: "Void" },
+];
 
-/* ------------------------------ status mapping ------------------------------ */
-// UI -> API
-const toApiStatus = (ui) => {
-  const s = String(ui || "").toLowerCase();
-  if (s === "paid") return "paid";
-  if (s === "open" || s === "overdue") return "sent"; // treat Overdue as an 'open/sent' state
-  return null; // backend will default to draft if null on create
-};
-// API -> UI
-const toUiStatus = (api) => {
-  const s = String(api || "").toLowerCase();
-  if (s === "paid") return "Paid";
-  if (s === "sent" || s === "draft") return "Open"; // show drafts as Open in UI
-  if (s === "void") return "Open";
-  return "Open";
-};
+const isObjectId = (s) => typeof s === "string" && /^[a-f\d]{24}$/i.test(s);
+const todayMid = () => new Date(new Date().toDateString());
 
 /* ------------------------------ API helpers ------------------------------ */
-const listInvoices = async (status = "All") => {
-  // map UI status to API query param
-  const apiStatus = toApiStatus(status);
-  const qs = apiStatus ? `?status=${encodeURIComponent(apiStatus)}` : "";
-  return api(`/api/invoices${qs}`);
-};
-
+// Fetch ALL and filter on client; avoids backend status enum mismatches
+const listInvoices = async () => api(`/api/invoices?limit=500`);
 const createInvoice = async (body) =>
   api("/api/invoices", { method: "POST", body });
 const updateInvoice = async (id, body) =>
   api(`/api/invoices/${encodeURIComponent(id)}`, { method: "PUT", body });
 const deleteInvoice = async (id) =>
   api(`/api/invoices/${encodeURIComponent(id)}`, { method: "DELETE" });
-
 const listCustomers = async () => api("/api/customers");
 
 /* ------------------------------ utils ------------------------------ */
@@ -61,63 +49,39 @@ const genInvoiceNo = () => {
   return `INV-${y}${m}-${String(r).padStart(4, "0")}`;
 };
 
-// Convert API invoice -> UI row
-const mapFromApi = (inv) => ({
-  id: inv.id || inv._id || inv.invoiceNo,
-  number: inv.invoiceNo,
-  customerName: inv.customerName || inv.customer?.name || "",
-  total: Number(inv.total) || 0,
-  date: inv.invoiceDate, // YYYY-MM-DD from backend
-  dueDate: inv.dueDate || inv.invoiceDate, // if you add dueDate later, it will map here
-  status: toUiStatus(inv.status),
-  // keep any extras for edit
-  _raw: inv,
-});
+const title = (s) =>
+  s ? s.charAt(0).toUpperCase() + s.slice(1).toLowerCase() : s;
 
-// Convert UI form -> API payload
-const buildApiPayload = (syncedForm, customers) => {
-  const first = syncedForm.items?.[0] || {
-    name: "",
-    qty: 1,
-    unitPrice: 0,
-    gstPct: 0,
-  };
-  const qty = Number(first.qty) || 1;
-  const rate = Number(first.unitPrice) || 0;
-  const gstPct = Number(first.gstPct) || 0;
+/* Convert API invoice -> UI row (derive Overdue in UI) */
+const mapFromApi = (inv) => {
+  const id = inv.id || inv._id || inv.invoiceNo;
+  const number = inv.number || inv.invoiceNo || "";
+  const customerName = inv.customerName || inv.customer?.name || "";
+  const total = Number(inv.total) || 0;
+  const date = inv.date || inv.invoiceDate || inv.createdAt || null;
+  const dueDate = inv.dueDate || null;
+  const rawStatus = String(inv.status || "open").toLowerCase();
 
-  const id = syncedForm.customerId || "";
-  const validId = typeof id === "string" && id.length === 24;
+  // derived overdue
+  const isPaid = rawStatus === "paid";
+  const overdue = !isPaid && dueDate && new Date(dueDate) < todayMid();
 
-  // tax in backend is an amount (not percentage)
-  const subtotal = qty * rate;
-  const tax = Math.round((subtotal * gstPct) / 100);
-
-  const customer = customers.find(
-    (x) => String(x._id) === String(syncedForm.customerId)
-  );
+  // UI status to display in table: Paid / Overdue / Open
+  const uiStatus = isPaid ? "Paid" : overdue ? "Overdue" : "Open";
 
   return {
-    ...(validId
-      ? { customerId: id }
-      : { customerName: customer?.name || syncedForm.customerName || "" }),
-    invoiceNo: syncedForm.number || "", // backend will auto-generate if blank
-    invoiceDate: syncedForm.date || new Date(),
-    status: toApiStatus(syncedForm.status) || undefined, // let backend default if undefined
-    lines: [
-      {
-        description: first.name || "",
-        qty,
-        rate,
-      },
-    ],
-    tax,
+    id,
+    number,
+    customerName,
+    total,
+    date,
+    dueDate,
+    status: uiStatus,
+    _raw: inv,
   };
 };
 
 /* ------------------------------ validation ------------------------------ */
-const isObjectId = (s) => typeof s === "string" && /^[a-f\d]{24}$/i.test(s);
-
 function validateInvoice(values) {
   const e = {};
   const hasId = isObjectId(values.customerId);
@@ -134,15 +98,21 @@ function validateInvoice(values) {
     e.date = "Valid date required";
   if (!values.dueDate || Number.isNaN(Date.parse(values.dueDate)))
     e.dueDate = "Valid due date required";
-  if (!values.status || !["Open", "Overdue", "Paid"].includes(values.status))
+
+  // form status is lowercased internal value (from STATUS_OPTS)
+  if (
+    !values.status ||
+    !STATUS_OPTS.some((o) => o.value === String(values.status).toLowerCase())
+  ) {
     e.status = "Choose status";
+  }
   return e;
 }
 
 /* ------------------------------ Page ------------------------------ */
 export default function Invoices() {
   const [rows, setRows] = useState([]);
-  const [status, setStatus] = useState("All");
+  const [statusFilter, setStatusFilter] = useState("All");
   const [q, setQ] = useState("");
 
   const [customers, setCustomers] = useState([]);
@@ -159,14 +129,15 @@ export default function Invoices() {
     let alive = true;
     (async () => {
       try {
-        const [ci, cust] = await Promise.all([
-          listInvoices(status),
-          listCustomers(),
-        ]);
+        const [ci, cust] = await Promise.all([listInvoices(), listCustomers()]);
         if (alive) {
-          const arr = Array.isArray(ci) ? ci : [];
-          setRows(arr.map(mapFromApi));
-          setCustomers(Array.isArray(cust) ? cust : []);
+          setRows((Array.isArray(ci) ? ci : []).map(mapFromApi));
+          setCustomers(
+            (Array.isArray(cust) ? cust : []).map((c) => ({
+              _id: String(c._id || c.id || ""), // force string id
+              name: c.name || c.displayName || "Unnamed", // safe label
+            }))
+          );
         }
       } catch (e) {
         console.error(e);
@@ -176,15 +147,15 @@ export default function Invoices() {
     return () => {
       alive = false;
     };
-  }, [status]);
+  }, []);
 
-  // read status from hash (?status=Open)
+  // read filter from hash (?status=Open)
   useEffect(() => {
     const readStatusFromHash = () => {
       const query = window.location.hash.split("?")[1] || "";
       const params = new URLSearchParams(query);
       const s = params.get("status");
-      if (s && STATUS.includes(s)) setStatus(s);
+      if (s && STATUS_FILTER.includes(s)) setStatusFilter(s);
     };
     readStatusFromHash();
     window.addEventListener("hashchange", readStatusFromHash);
@@ -194,7 +165,8 @@ export default function Invoices() {
   /* ------------------------------ filter ------------------------------ */
   const filtered = useMemo(() => {
     let list = rows;
-    if (status !== "All") list = list.filter((r) => r.status === status);
+    if (statusFilter !== "All")
+      list = list.filter((r) => r.status === statusFilter);
     if (q.trim()) {
       const s = q.trim().toLowerCase();
       list = list.filter(
@@ -204,7 +176,7 @@ export default function Invoices() {
       );
     }
     return list;
-  }, [rows, q, status]);
+  }, [rows, q, statusFilter]);
 
   /* ------------------------------ CRUD ------------------------------ */
   const openDelete = (row) => {
@@ -213,10 +185,10 @@ export default function Invoices() {
   };
 
   const confirmDelete = async () => {
-    const id = target?.id || target?._id || target?.number;
+    const id = target?.id || target?._id;
     if (!id) return setConfirmOpen(false);
     const prev = rows;
-    setRows(rows.filter((r) => (r.id || r._id || r.number) !== id));
+    setRows(rows.filter((r) => (r.id || r._id) !== id));
     setConfirmOpen(false);
     setTarget(null);
     try {
@@ -234,19 +206,12 @@ export default function Invoices() {
     due.setDate(due.getDate() + 14);
     setFormInitial({
       number: genInvoiceNo(),
-      customerId: "", // required
+      customerId: "",
       customerName: "",
       date: today.toISOString().slice(0, 10),
       dueDate: due.toISOString().slice(0, 10),
-      status: "Open",
-      items: [
-        {
-          name: "",
-          qty: 1,
-          unitPrice: 0,
-          gstPct: 18,
-        },
-      ],
+      status: "open", // lower-case internal value
+      items: [{ name: "", qty: 1, unitPrice: 0, gstPct: 18 }],
       total: 0,
     });
     setFormErrors({});
@@ -260,8 +225,12 @@ export default function Invoices() {
       unitPrice: 0,
       gstPct: 0,
     };
+    // Internal form keeps lowercase status value from the raw doc if present; fallback via row.status
+    const raw = row._raw || {};
+    const rawStatus = String(raw.status || "").toLowerCase() || "open";
     setFormInitial({
       ...row,
+      status: rawStatus, // edit the actual stored status
       items: [first],
       total:
         Number(row.total) ||
@@ -272,7 +241,7 @@ export default function Invoices() {
   };
 
   const submitForm = async () => {
-    // keep items + total in sync
+    // sync item + total
     const first = (formInitial.items && formInitial.items[0]) || {
       name: "",
       qty: 1,
@@ -293,15 +262,15 @@ export default function Invoices() {
     };
     setFormInitial(synced);
 
-    // derive a reliable customerName if id is present
+    // ensure customerName if only id is chosen
     const id = String(synced.customerId || "");
-    const validId = /^[a-f\d]{24}$/i.test(id);
+    const validId = isObjectId(id);
     const fromList = validId
       ? customers.find((x) => String(x._id) === id)?.name
       : null;
     const ensuredName = (synced.customerName || fromList || "").trim();
 
-    // run validation (now accepts either id or name)
+    // validate (either id or name is ok)
     const errors = validateInvoice({ ...synced, customerName: ensuredName });
     setFormErrors(errors);
     if (Object.keys(errors).length) {
@@ -309,20 +278,29 @@ export default function Invoices() {
       return;
     }
 
-    // build the backend payload (id if valid; else name)
-    const qty = Number(synced.items[0].qty) || 1;
-    const rate = Number(synced.items[0].unitPrice) || 0;
-    const gstPct = Number(synced.items[0].gstPct) || 0;
-    const subtotal = qty * rate;
-    const tax = Math.round((subtotal * gstPct) / 100);
+    // build API payload (IMPORTANT: send status exactly as lower-case option)
+    const itemsForApi = [
+      {
+        description: synced.items[0].name || "",
+        qty: Number(synced.items[0].qty) || 1,
+        rate: Number(synced.items[0].unitPrice) || 0,
+      },
+    ];
+    const subtotal =
+      (Number(synced.items[0].qty) || 1) *
+      (Number(synced.items[0].unitPrice) || 0);
+    const tax = Math.round(
+      (subtotal * (Number(synced.items[0].gstPct) || 0)) / 100
+    );
 
     const payload = {
       ...(validId ? { customerId: id } : { customerName: ensuredName }),
-      invoiceNo: synced.number || "", // backend can auto-fill if empty
-      invoiceDate: synced.date || new Date(),
-      status: synced.status === "Paid" ? "paid" : "sent", // map UI→API; "Open/Overdue" → "sent"
-      lines: [{ description: synced.items[0].name, qty, rate }],
+      invoiceNo: synced.number || undefined,
+      invoiceDate: synced.date || new Date().toISOString().slice(0, 10),
+      dueDate: synced.dueDate || undefined,
+      lines: itemsForApi,
       tax,
+      status: String(synced.status || "open").toLowerCase(), // <-- key change
     };
 
     const isEdit = !!(synced?.id || synced?._id);
@@ -346,16 +324,7 @@ export default function Invoices() {
 
     try {
       const res = await p;
-      const mapped = {
-        id: res.id || res._id || res.invoiceNo,
-        number: res.invoiceNo,
-        customerName: res.customerName || res.customer?.name || ensuredName,
-        total: Number(res.total) || subtotal + tax,
-        date: res.invoiceDate,
-        dueDate: res.dueDate || res.invoiceDate,
-        status: res.status === "paid" ? "Paid" : "Open",
-        _raw: res,
-      };
+      const mapped = mapFromApi(res);
       const idx = rows.findIndex(
         (r) => (r.id || r._id || r.number) === mapped.id
       );
@@ -379,19 +348,17 @@ export default function Invoices() {
       {/* Filters */}
       <div className="flex flex-wrap items-center gap-3">
         <input
-          className="w-72 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none
-                     focus:ring-2 focus:ring-emerald-400"
+          className="w-72 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-400"
           placeholder="Search number or customer"
           value={q}
           onChange={(e) => setQ(e.target.value)}
         />
         <select
-          className="w-44 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none
-                     focus:ring-2 focus:ring-emerald-400"
-          value={status}
-          onChange={(e) => setStatus(e.target.value)}
+          className="w-44 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-400"
+          value={statusFilter}
+          onChange={(e) => setStatusFilter(e.target.value)}
         >
-          {STATUS.map((s) => (
+          {STATUS_FILTER.map((s) => (
             <option key={s} value={s}>
               {s}
             </option>
@@ -477,9 +444,9 @@ export default function Invoices() {
         {formInitial && (
           <div className="grid grid-cols-2 gap-3">
             {/* number (readonly) */}
-            <Field label="Invoice #" error={formErrors.number}>
+            <Field label="Invoice #">
               <input
-                className={inClass(formErrors.number)}
+                className={inClass()}
                 value={formInitial.number || ""}
                 readOnly
               />
@@ -489,29 +456,29 @@ export default function Invoices() {
             <Field label="Customer" error={formErrors.customerId}>
               <select
                 className={inClass(formErrors.customerId)}
-                value={formInitial.customerId || ""}
+                value={String(formInitial.customerId || "")} // <- keep as string
                 onChange={(e) => {
                   const id = e.target.value;
-                  const c = customers.find((x) => String(x._id) === id);
+                  const c = customers.find((x) => x._id === id);
                   setFormInitial({
                     ...formInitial,
-                    customerId: id,
-                    customerName: c?.name || "",
+                    customerId: id, // store string id
+                    customerName: c?.name || "", // keep name for payload fallback
                   });
                 }}
               >
                 <option key="none" value="">
                   — Select —
                 </option>
-                {customers.map((c, idx) => (
-                  <option key={c._id || idx} value={c._id || c.id || ""}>
-                    {c.name || `Customer ${idx + 1}`}
+                {customers.map((c) => (
+                  <option key={c._id} value={c._id}>
+                    {c.name}
                   </option>
                 ))}
               </select>
             </Field>
 
-            {/* Product picker that can fill first line */}
+            {/* Product picker to prefill first line */}
             <Field label="Pick a product (optional)">
               <ProductSelect
                 onPick={(p) => {
@@ -630,18 +597,20 @@ export default function Invoices() {
               />
             </Field>
 
-            {/* status */}
-            <Field label="Status" error={formErrors.status}>
+            {/* status (send lower-case value to backend) */}
+            <Field label="Status" error={formErrors?.status}>
               <select
-                className={inClass(formErrors.status)}
-                value={formInitial.status || "Open"}
+                className={inClass(formErrors?.status)}
+                value={(formInitial.status || "open").toLowerCase()}
                 onChange={(e) =>
                   setFormInitial({ ...formInitial, status: e.target.value })
                 }
               >
-                <option>Open</option>
-                <option>Overdue</option>
-                <option>Paid</option>
+                {STATUS_OPTS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
               </select>
             </Field>
 

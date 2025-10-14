@@ -1,175 +1,233 @@
-import { Router } from 'express';
+// backend/src/routes/invoices.js
+import express from 'express';
 import mongoose from 'mongoose';
-import Invoice from '../models/Invoice.js';
-import Customer from '../models/Customer.js';
-import { asyncHandler } from '../utils/asyncHandler.js';
 
-const r = Router();
+const router = express.Router();
 
-const STATUS = new Set(['draft','sent','paid','void']);
-const MAP = new Map([['open','sent'],['unpaid','sent'],['outstanding','sent'],['issued','sent'],['settled','paid'],['completed','paid'],['cancelled','void'],['canceled','void'],['voided','void']]);
-const normStatus = s => { if (s==null) return null; const v=String(s).trim().toLowerCase(); const m=MAP.get(v)||v; return STATUS.has(m)?m:null; };
-const normDate = d => { if (!d) return null; const t=d instanceof Date?d:new Date(d); return isNaN(t.getTime())?null:t.toISOString().slice(0,10); };
-const autoNo = () => { const d=new Date(); return `INV-${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}-${Math.floor(Math.random()*900)+100}`; };
+// --- helpers ---
+const isId = (s) => typeof s === 'string' && /^[a-f\d]{24}$/i.test(s);
 
-const shape = (inv) => {
-  const x = typeof inv.toJSON === 'function' ? inv.toJSON() : inv;
-  return {
-    id: x.id || x._id?.toString(),
-    tenantId: x.tenantId,
-    customerId: typeof x.customerId === 'object' ? x.customerId._id?.toString?.() : x.customerId,
-    customerName: typeof x.customerId === 'object' ? (x.customerId.name || null) : null,
-    invoiceNo: x.invoiceNo,
-    invoiceDate: typeof x.invoiceDate === 'string' ? x.invoiceDate
-      : x.invoiceDate instanceof Date ? x.invoiceDate.toISOString().slice(0,10) : x.invoiceDate,
-    lines: x.lines || [], subtotal: x.subtotal, tax: x.tax, total: x.total, status: x.status,
-    createdAt: x.createdAt, updatedAt: x.updatedAt,
-  };
+const ALLOWED_STATUS = new Set(['draft', 'sent', 'open', 'paid', 'void']);
+// Note: "overdue" is computed (dueDate < today && not paid)
+// so we don't store it; we only allow filtering by it.
+
+const normStatus = (s) => {
+  if (!s) return null;
+  const v = String(s).trim().toLowerCase();
+  return ALLOWED_STATUS.has(v) ? v : null;
 };
 
-/* LIST */
-r.get('/', asyncHandler(async (req, res) => {
-  const TENANT = req.tenantId;
-  const { page=1, limit=20, status } = req.query;
-  const p = Math.max(1, parseInt(page,10)||1);
-  const l = Math.min(100, Math.max(1, parseInt(limit,10)||20));
-  const q = { tenantId: TENANT };
-  if (status != null && String(status).trim() !== '') {
-    const s = normStatus(status); if (!s) return res.status(422).json({ error: 'status invalid' }); q.status = s;
+const title = (s) => s ? s.charAt(0).toUpperCase() + s.slice(1).toLowerCase() : s;
+
+// --- Mongoose models (lightweight require to avoid circulars) ---
+const Invoice = mongoose.model('Invoice');
+const Customer = mongoose.model('Customer');
+
+// --- GET /api/invoices ---
+router.get('/', async (req, res) => {
+  try {
+    const tenantId = req.headers['x-tenant-id'];
+    if (!tenantId) return res.status(400).json({ error: 'x-tenant-id required' });
+
+    const { status, q, limit = 200, offset = 0 } = req.query;
+    const lim = Math.min(Number(limit) || 200, 1000);
+    const off = Math.max(Number(offset) || 0, 0);
+
+    const find = { tenantId };
+
+    // status filter (case-insensitive)
+    if (status) {
+      const sRaw = String(status).trim().toLowerCase();
+      if (sRaw === 'overdue') {
+        // computed overdue: not paid & dueDate < today
+        const todayMid = new Date(new Date().toDateString());
+        find.status = { $ne: 'paid' };
+        find.dueDate = { $lt: todayMid };
+      } else if (ALLOWED_STATUS.has(sRaw)) {
+        find.status = sRaw;
+      } else if (sRaw !== 'all') {
+        return res.status(422).json({ error: 'Invalid status filter' });
+      }
+    }
+
+    // q search on number + customerName (if provided)
+    if (q && String(q).trim()) {
+      const s = String(q).trim();
+      find.$or = [
+        { number: { $regex: s, $options: 'i' } },
+        { invoiceNo: { $regex: s, $options: 'i' } },
+        { customerName: { $regex: s, $options: 'i' } },
+      ];
+    }
+
+    const docs = await Invoice.find(find)
+      .sort({ invoiceDate: -1, createdAt: -1 })
+      .skip(off)
+      .limit(lim)
+      .lean();
+
+    const out = docs.map(d => ({
+      id: String(d._id),
+      number: d.number || d.invoiceNo || '',
+      customerName: d.customerName || '',
+      total: Number(d.total) || 0,
+      date: d.date || d.invoiceDate || d.createdAt,
+      dueDate: d.dueDate || null,
+      status: title(d.status || 'open'),
+      createdAt: d.createdAt,
+      updatedAt: d.updatedAt,
+    }));
+
+    res.setHeader('x-total-count', String(out.length));
+    return res.json(out);
+  } catch (e) {
+    console.error('[invoices] list error', e);
+    return res.status(500).json({ error: 'Server error' });
   }
-  const [rows, total] = await Promise.all([
-    Invoice.find(q).populate({ path: 'customerId', select: 'name email phone' })
-      .sort({ createdAt:-1 }).skip((p-1)*l).limit(l).lean(),
-    Invoice.countDocuments(q),
-  ]);
-  res.setHeader('x-total-count', String(total));
-  res.json(rows.map(shape));
-}));
+});
 
-/* CREATE — tolerant to bad customerId: falls back to customerName/customer.name */
-r.post('/', asyncHandler(async (req, res) => {
-  const TENANT = req.tenantId;
+// --- POST /api/invoices ---
+router.post('/', async (req, res) => {
+  try {
+    const tenantId = req.headers['x-tenant-id'];
+    if (!tenantId) return res.status(400).json({ error: 'x-tenant-id required' });
 
-  let { customerId, customer, customerName, invoiceNo, invoiceDate, lines = [], tax = 0, status } = req.body || {};
+    const body = req.body || {};
+    let { customerId, customerName, invoiceNo, number, invoiceDate, date, dueDate, lines, tax, status } = body;
 
-  // Prefer explicit id; else get from customer object; else from customerName
-  if (!customerId) customerId = customer?._id || customer?.id || null;
+    // customer resolution (id or name)
+    let custId = isId(customerId) ? customerId : null;
+    let custName = (customerName || '').trim();
 
-  // If the id is present but invalid → ignore it and try to resolve by name
-  if (customerId && !mongoose.Types.ObjectId.isValid(customerId)) {
-    customerId = null;
-    if (!customerName) customerName = customer?.name; // fallback from object
-  }
+    if (!custId && custName) {
+      // try find existing
+      const c = await Customer.findOne({ tenantId, name: custName }).lean();
+      if (c) custId = String(c._id);
+    }
 
-  // If still no id, resolve/create by name
-  if (!customerId) {
-    const name = (customerName || '').toString().trim();
-    if (!name) return res.status(422).json({ error: 'customerId invalid and no customerName provided' });
-    const ex = await Customer.findOne({ tenantId: TENANT, name }).lean();
-    customerId = ex ? ex._id.toString() : (await Customer.create({ tenantId: TENANT, name }))._id.toString();
-  }
+    if (!custId && !custName) {
+      return res.status(422).json({ error: 'customerId invalid and no customerName provided' });
+    }
 
-  // ensure the (resolved) customer belongs to tenant
-  const own = await Customer.exists({ _id: customerId, tenantId: TENANT });
-  if (!own) return res.status(400).json({ error: 'Invalid customer for tenant' });
+    const invDate = date || invoiceDate || new Date();
+    const stat = normStatus(status) || 'open';
 
-  // Dates & invoice no
-  const invDate = normDate(invoiceDate) || normDate(new Date());
-  if (!invDate) return res.status(422).json({ error: 'invoiceDate invalid' });
-  if (!invoiceNo || String(invoiceNo).trim() === '') invoiceNo = autoNo();
+    // compute totals (simple: sum qty*rate + tax)
+    const safeLines = Array.isArray(lines) ? lines : [];
+    const subtotal = safeLines.reduce((s, l) => s + (Number(l.qty) || 0) * (Number(l.rate) || 0), 0);
+    const taxNum = Number(tax) || 0;
+    const total = subtotal + taxNum;
 
-  // Lines & totals
-  const computed = Array.isArray(lines) ? lines.map(l => {
-    const qty = Number(l?.qty ?? 0), rate = Number(l?.rate ?? 0);
-    return { description: String(l?.description ?? ''), qty: Number.isFinite(qty)?qty:0, rate: Number.isFinite(rate)?rate:0, amount: (Number.isFinite(qty)?qty:0)*(Number.isFinite(rate)?rate:0) };
-  }) : [];
-  const subtotal = computed.reduce((s,x)=>s+(Number.isFinite(x.amount)?x.amount:0),0);
-  const taxNum = Number(tax ?? 0);
-  const total = subtotal + (Number.isFinite(taxNum)?taxNum:0);
-
-  // createdBy (optional)
-  const headerUserId = req.headers['x-user-id'];
-  const createdByPatch = (headerUserId && mongoose.Types.ObjectId.isValid(headerUserId)) ? { createdBy: headerUserId } : {};
-
-  const created = await Invoice.create({
-    tenantId: TENANT,
-    customerId,
-    invoiceNo: String(invoiceNo),
-    invoiceDate: invDate,
-    lines: computed,
-    subtotal,
-    tax: Number.isFinite(taxNum) ? taxNum : 0,
-    total,
-    status: normStatus(status) || 'draft',
-    ...createdByPatch,
-  });
-
-  const populated = await Invoice.findById(created._id)
-    .populate({ path: 'customerId', select: 'name email phone' })
-    .lean();
-
-  res.status(201).json(shape(populated));
-}));
-
-/* READ */
-r.get('/:id', asyncHandler(async (req, res) => {
-  const TENANT = req.tenantId;
-  const { id } = req.params;
-  if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ error: 'Invalid id' });
-  const doc = await Invoice.findOne({ _id: id, tenantId: TENANT })
-    .populate({ path: 'customerId', select: 'name email phone' }).lean();
-  if (!doc) return res.status(404).json({ error: 'Not found' });
-  res.json(shape(doc));
-}));
-
-/* UPDATE */
-async function updateInvoice(req, res) {
-  const TENANT = req.tenantId;
-  const { id } = req.params;
-  if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ error: 'Invalid id' });
-
-  const update = { ...(req.body || {}) };
-
-  if ('status' in update) {
-    const s = normStatus(update.status);
-    if (!s) return res.status(422).json({ error: 'status invalid' });
-    update.status = s;
-  }
-  if ('invoiceDate' in update) {
-    const nd = normDate(update.invoiceDate);
-    if (!nd) return res.status(422).json({ error: 'invoiceDate invalid' });
-    update.invoiceDate = nd;
-  }
-  if (Array.isArray(update.lines)) {
-    const computed = update.lines.map(l => {
-      const qty = Number(l?.qty ?? 0), rate = Number(l?.rate ?? 0);
-      return { description: String(l?.description ?? ''), qty: Number.isFinite(qty)?qty:0, rate: Number.isFinite(rate)?rate:0, amount: (Number.isFinite(qty)?qty:0)*(Number.isFinite(rate)?rate:0) };
+    const doc = await Invoice.create({
+      tenantId,
+      customerId: custId || undefined,
+      customerName: custName || undefined,
+      number: number || invoiceNo || undefined,
+      invoiceNo: number || invoiceNo || undefined,
+      invoiceDate: invDate,
+      dueDate: dueDate || undefined,
+      lines: safeLines.map(l => ({ description: l.description || '', qty: Number(l.qty) || 0, rate: Number(l.rate) || 0 })),
+      subtotal, tax: taxNum, total,
+      status: stat,
     });
-    const subtotal = computed.reduce((s,x)=>s+(Number.isFinite(x.amount)?x.amount:0),0);
-    const taxNum = Number(update.tax ?? 0);
-    update.lines = computed;
-    update.subtotal = subtotal;
-    update.tax = Number.isFinite(taxNum)?taxNum:0;
-    update.total = subtotal + (Number.isFinite(taxNum)?taxNum:0);
+
+    return res.status(201).json({
+      id: String(doc._id),
+      number: doc.number || doc.invoiceNo || '',
+      customerName: doc.customerName || '',
+      total: Number(doc.total) || 0,
+      date: doc.date || doc.invoiceDate || doc.createdAt,
+      dueDate: doc.dueDate || null,
+      status: title(doc.status || 'open'),
+      createdAt: doc.createdAt,
+      updatedAt: doc.updatedAt,
+    });
+  } catch (e) {
+    console.error('[invoices] create error', e);
+    return res.status(500).json({ error: 'Server error' });
   }
+});
 
-  await Invoice.updateOne({ _id: id, tenantId: TENANT }, { $set: update });
-  const after = await Invoice.findOne({ _id: id, tenantId: TENANT })
-    .populate({ path: 'customerId', select: 'name email phone' }).lean();
-  if (!after) return res.status(404).json({ error: 'Not found' });
-  res.json(shape(after));
-}
-r.patch('/:id', asyncHandler(updateInvoice));
-r.put('/:id',   asyncHandler(updateInvoice));
+// --- PUT /api/invoices/:id ---
+router.put('/:id', async (req, res) => {
+  try {
+    const tenantId = req.headers['x-tenant-id'];
+    if (!tenantId) return res.status(400).json({ error: 'x-tenant-id required' });
 
-/* DELETE */
-r.delete('/:id', asyncHandler(async (req, res) => {
-  const TENANT = req.tenantId;
-  const { id } = req.params;
-  if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ error: 'Invalid id' });
-  const ok = await Invoice.deleteOne({ _id: id, tenantId: TENANT });
-  if (ok.deletedCount === 0) return res.status(404).json({ error: 'Not found' });
-  res.status(204).end();
-}));
+    const { id } = req.params;
+    if (!isId(id)) return res.status(404).json({ error: 'Not found' });
 
-export default r;
+    const body = req.body || {};
+    const update = {};
+
+    if (body.number || body.invoiceNo) {
+      update.number = body.number || body.invoiceNo;
+      update.invoiceNo = update.number;
+    }
+    if (body.invoiceDate || body.date) update.invoiceDate = body.invoiceDate || body.date;
+    if (body.dueDate !== undefined) update.dueDate = body.dueDate || null;
+    if (Array.isArray(body.lines)) {
+      update.lines = body.lines.map(l => ({ description: l.description || '', qty: Number(l.qty) || 0, rate: Number(l.rate) || 0 }));
+      const subtotal = update.lines.reduce((s, l) => s + (Number(l.qty) || 0) * (Number(l.rate) || 0), 0);
+      const taxNum = Number(body.tax ?? 0) || 0;
+      update.subtotal = subtotal;
+      update.tax = taxNum;
+      update.total = subtotal + taxNum;
+    } else if (body.tax !== undefined) {
+      const taxNum = Number(body.tax) || 0;
+      update.tax = taxNum;
+    }
+
+    if (body.status !== undefined) {
+      // normalize; ignore "overdue" on write (it's derived)
+      const s = normStatus(body.status);
+      if (s) update.status = s;
+    }
+
+    if (body.customerId && isId(body.customerId)) {
+      update.customerId = body.customerId;
+      // optional customerName keep if provided
+      if (body.customerName) update.customerName = String(body.customerName).trim();
+    } else if (body.customerName) {
+      update.customerName = String(body.customerName).trim();
+      update.customerId = undefined;
+    }
+
+    const doc = await Invoice.findOneAndUpdate({ _id: id, tenantId }, update, { new: true }).lean();
+    if (!doc) return res.status(404).json({ error: 'Not found' });
+
+    return res.json({
+      id: String(doc._id),
+      number: doc.number || doc.invoiceNo || '',
+      customerName: doc.customerName || '',
+      total: Number(doc.total) || 0,
+      date: doc.date || doc.invoiceDate || doc.createdAt,
+      dueDate: doc.dueDate || null,
+      status: title(doc.status || 'open'),
+      createdAt: doc.createdAt,
+      updatedAt: doc.updatedAt,
+    });
+  } catch (e) {
+    console.error('[invoices] update error', e);
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// --- DELETE /api/invoices/:id ---
+router.delete('/:id', async (req, res) => {
+  try {
+    const tenantId = req.headers['x-tenant-id'];
+    if (!tenantId) return res.status(400).json({ error: 'x-tenant-id required' });
+    const { id } = req.params;
+    if (!isId(id)) return res.status(404).json({ error: 'Not found' });
+
+    const r = await Invoice.deleteOne({ _id: id, tenantId });
+    if (!r.deletedCount) return res.status(404).json({ error: 'Not found' });
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error('[invoices] delete error', e);
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+export default router;
