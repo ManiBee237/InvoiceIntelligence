@@ -1,47 +1,42 @@
-// src/models/Invoice.js
+// backend/src/models/invoice.js
 import mongoose from 'mongoose';
 
 const LineSchema = new mongoose.Schema(
   {
-    description: { type: String, required: true, trim: true },
-    qty:   { type: Number, required: true, min: 0 },
-    rate:  { type: Number, required: true, min: 0 },
-    amount:{ type: Number, required: true, min: 0 },
+    description: { type: String, trim: true, default: '' },
+    qty: { type: Number, min: 0, default: 0 },
+    rate: { type: Number, min: 0, default: 0 },
   },
   { _id: false }
 );
 
-// ...rest unchanged...
 const InvoiceSchema = new mongoose.Schema(
   {
-    tenantId:   { type: String, required: true, index: true },
-    customerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Customer', required: true },
-    invoiceNo:  { type: String, required: true, trim: true },
-    invoiceDate:{ type: Date,   required: true },
-    lines:      { type: [LineSchema], default: [] },
-    subtotal:   { type: Number, required: true, min: 0 },
-    tax:        { type: Number, required: true, min: 0 },
-    total:      { type: Number, required: true, min: 0 },
-    status:     { type: String, enum: ['draft','sent','paid','void'], default: 'draft' },
-    createdBy:  { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, // <-- add
+    tenantId: { type: String, required: true, index: true },
+
+    customerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Customer' },
+    customerName: { type: String, trim: true },
+
+    number: { type: String, trim: true, index: true },
+    invoiceNo: { type: String, trim: true, index: true },
+
+    invoiceDate: { type: Date, required: true, default: () => new Date() },
+    dueDate: { type: Date },
+
+    lines: { type: [LineSchema], default: [] },
+    subtotal: { type: Number, min: 0, default: 0 },
+    tax: { type: Number, min: 0, default: 0 },
+    total: { type: Number, min: 0, default: 0 },
+
+    status: { type: String, enum: ['open', 'overdue', 'paid'], default: 'open', index: true },
   },
-  {
-    timestamps: true,
-    toJSON: {
-      virtuals: true,
-      transform(_doc, ret) {
-        ret.id = ret._id?.toString();
-        delete ret._id;
-        delete ret.__v;
-        if (ret.invoiceDate instanceof Date) {
-          ret.invoiceDate = ret.invoiceDate.toISOString().slice(0,10);
-        }
-        return ret;
-      },
-    },
-  }
+  { timestamps: true }
 );
-// ...index & export unchanged...
 
+InvoiceSchema.pre('save', function (next) {
+  if (this.number && !this.invoiceNo) this.invoiceNo = this.number;
+  if (this.invoiceNo && !this.number) this.number = this.invoiceNo;
+  next();
+});
 
-export default mongoose.model('Invoice', InvoiceSchema);
+export default mongoose.models.Invoice || mongoose.model('Invoice', InvoiceSchema);
