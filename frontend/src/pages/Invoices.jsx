@@ -39,13 +39,19 @@ const genInvoiceNo = () => {
   const r = Math.floor(Math.random() * 10000);
   return `INV-${y}${m}-${String(r).padStart(4, "0")}`;
 };
+
+// tolerant mapper for customer name variants
 const mapFromApi = (inv) => {
   const raw = String(inv.status || "open").toLowerCase();
   const ui = raw === "paid" ? "Paid" : raw === "overdue" ? "Overdue" : "Open";
   return {
     id: inv.id || inv._id || inv.invoiceNo,
     number: inv.number || inv.invoiceNo || "",
-    customerName: inv.customerName || inv.customer?.name || "",
+    customerName:
+      inv.customerName ||
+      inv.customerId?.name || inv.customerId?.Name || inv.customerId?.displayName ||
+      inv.customer?.name   || inv.customer?.Name   || inv.customer?.displayName ||
+      "",
     total: Number(inv.total) || 0,
     date: inv.date || inv.invoiceDate || inv.createdAt,
     dueDate: inv.dueDate || null,
@@ -93,14 +99,32 @@ export default function Invoices() {
       try {
         const [ci, cust] = await Promise.all([listInvoices(), listCustomers()]);
         if (!alive) return;
-        setRows((Array.isArray(ci) ? ci : []).map(mapFromApi));
-        // normalize customers -> {_id: string, name}
-        setCustomers(
-          (Array.isArray(cust) ? cust : []).map((c) => ({
-            _id: String(c._id || c.id || ''),
-            name: c.name || c.displayName || 'Unnamed',
-          }))
-        );
+
+        // normalize customers -> {_id, name} (accept Name/displayName/customer)
+        const normCustomers = (Array.isArray(cust) ? cust : []).map((c) => ({
+          _id: String(c._id || c.id || ''),
+          name: c.name || c.Name || c.displayName || c.customer || 'Unnamed',
+        }));
+        setCustomers(normCustomers);
+
+        // quick lookup map
+        const nameById = new Map(normCustomers.map(c => [String(c._id), c.name]));
+
+        // map invoices and fill missing names from customers list
+        const mapped = (Array.isArray(ci) ? ci : []).map((inv) => {
+          const row = mapFromApi(inv);
+          if (!row.customerName) {
+            const cid = String(
+              inv.customerId?._id || inv.customerId?.id || inv.customerId ||
+              inv.customer?._id    || inv.customer?.id    ||
+              ''
+            );
+            if (cid) row.customerName = nameById.get(cid) || row.customerName || '';
+          }
+          return row;
+        });
+
+        setRows(mapped);
       } catch (e) {
         notify.error("Failed to load invoices", e.message || "Try again");
       }
@@ -161,7 +185,7 @@ export default function Invoices() {
       customerName: "",
       date: today.toISOString().slice(0, 10),
       dueDate: due.toISOString().slice(0, 10),
-      status: "open", // only open/overdue/paid
+      status: "open",
       items: [{ name: "", qty: 1, unitPrice: 0, gstPct: 18 }],
       total: 0,
     });
@@ -175,7 +199,7 @@ export default function Invoices() {
     const rawStatus = String(raw.status || "").toLowerCase() || "open";
     setFormInitial({
       ...row,
-      status: rawStatus, // exactly what's stored: open/overdue/paid
+      status: rawStatus,
       items: [first],
       total: Number(row.total) || computeTotal(first.unitPrice, first.qty, first.gstPct),
     });
@@ -197,7 +221,6 @@ export default function Invoices() {
     };
     setFormInitial(synced);
 
-    // ensure name if only id is chosen
     const id = String(synced.customerId || "");
     const validId = isObjectId(id);
     const fromList = validId ? customers.find((x) => String(x._id) === id)?.name : null;
@@ -210,7 +233,6 @@ export default function Invoices() {
       return;
     }
 
-    // payload (status sent EXACTLY as selected)
     const itemsForApi = [{
       description: synced.items[0].name || "",
       qty: Number(synced.items[0].qty) || 1,
@@ -226,7 +248,7 @@ export default function Invoices() {
       dueDate: synced.dueDate || undefined,
       lines: itemsForApi,
       tax,
-      status: String(synced.status || "open").toLowerCase(), // 'open' | 'overdue' | 'paid'
+      status: String(synced.status || "open").toLowerCase(),
     };
 
     const isEdit = !!(synced?.id || synced?._id);
@@ -282,7 +304,7 @@ export default function Invoices() {
           initialSort={{ key: "number", dir: "asc" }}
           columns={[
             { key: "number", header: "#" },
-            { key: "customerName", header: "Customer" },
+            { key: "customerName", header: "Customer", render: (r) => r.customerName || "—" },
             { key: "total", header: "Total", align: "right", render: (r) => inr(Number(r.total) || 0) },
             { key: "date", header: "Date", render: (r) => dd(r.date) },
             { key: "dueDate", header: "Due", render: (r) => dd(r.dueDate) },

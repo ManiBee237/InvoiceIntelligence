@@ -1,7 +1,7 @@
 // backend/src/routes/invoices.js
 import express from 'express';
 import mongoose from 'mongoose';
-import Invoice from '../models/Invoice.js';  // <-- lowercase file name with .js
+import Invoice from '../models/Invoice.js';
 
 const Customer = mongoose.models.Customer || mongoose.model('Customer');
 const router = express.Router();
@@ -14,10 +14,15 @@ const normStatus = (s) => {
 };
 const title = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1).toLowerCase() : s);
 
-// GET /api/invoices
+// ---- Helpers ----
+const getTenant = (req) =>
+  (req.tenantId && String(req.tenantId)) ||
+  ((req.headers['x-tenant-id'] ?? '').toString().trim().toLowerCase());
+
+// ---- LIST: GET /api/invoices ----
 router.get('/', async (req, res) => {
   try {
-    const tenantId = req.headers['x-tenant-id'];
+    const tenantId = getTenant(req);
     if (!tenantId) return res.status(400).json({ error: 'x-tenant-id required' });
 
     const { status, q, limit = 500, offset = 0 } = req.query;
@@ -47,16 +52,27 @@ router.get('/', async (req, res) => {
       ];
     }
 
-    const docs = await Invoice.find(find)
-      .sort({ invoiceDate: -1, createdAt: -1 })
-      .skip(Math.max(+offset || 0, 0))
-      .limit(Math.min(+limit || 500, 1000))
-      .lean();
+    const [docs, total] = await Promise.all([
+      Invoice.find(find)
+        // populate any plausible customer name field
+        .populate({ path: 'customerId', select: 'name Name displayName', options: { lean: true } })
+        .sort({ invoiceDate: -1, createdAt: -1 })
+        .skip(Math.max(+offset || 0, 0))
+        .limit(Math.min(+limit || 500, 1000))
+        .lean(),
+      Invoice.countDocuments(find),
+    ]);
 
     const out = docs.map((d) => ({
       id: String(d._id),
       number: d.number || d.invoiceNo || '',
-      customerName: d.customerName || '',
+      // prefer denormalized, else populated variants
+      customerName:
+        d.customerName ||
+        d.customerId?.name ||
+        d.customerId?.Name ||
+        d.customerId?.displayName ||
+        '',
       total: Number(d.total) || 0,
       date: d.invoiceDate || d.createdAt,
       dueDate: d.dueDate || null,
@@ -65,7 +81,7 @@ router.get('/', async (req, res) => {
       updatedAt: d.updatedAt,
     }));
 
-    res.setHeader('x-total-count', String(out.length));
+    res.setHeader('x-total-count', String(total));
     return res.json(out);
   } catch (e) {
     console.error('[invoices] list error:', e);
@@ -73,10 +89,10 @@ router.get('/', async (req, res) => {
   }
 });
 
-// POST /api/invoices
+// ---- CREATE: POST /api/invoices ----
 router.post('/', async (req, res) => {
   try {
-    const tenantId = req.headers['x-tenant-id'];
+    const tenantId = getTenant(req);
     if (!tenantId) return res.status(400).json({ error: 'x-tenant-id required' });
 
     const body = req.body || {};
@@ -90,23 +106,48 @@ router.post('/', async (req, res) => {
       status,
     } = body;
 
-    // resolve customer
+    // resolve customer (id or name)
     let custId = isId(customerId) ? customerId : null;
     let custName = (customerName || '').trim();
+
     if (!custId && custName) {
       const c = await (Customer?.findOne ? Customer.findOne({ tenantId, name: custName }) : null);
       if (c) custId = String(c._id);
     }
+    // if id present but name missing, fetch name
+    if (custId && !custName && Customer?.findOne) {
+      const c = await Customer.findOne({ _id: custId, tenantId }).select('name Name displayName').lean();
+      custName = c?.name || c?.Name || c?.displayName || custName;
+    }
+
     if (!custId && !custName) {
       return res.status(422).json({ error: 'customerId invalid and no customerName provided' });
     }
 
-    const invDate = date || invoiceDate || new Date();
-    const normLines = Array.isArray(lines) ? lines.map((l) => ({
-      description: l.description || '',
-      qty: Number(l.qty) || 0,
-      rate: Number(l.rate) || 0,
-    })) : [];
+    // dates
+    const invDate = new Date(date || invoiceDate || Date.now());
+    if (Number.isNaN(invDate.getTime())) {
+      return res.status(422).json({ error: 'Invalid invoiceDate/date' });
+    }
+    let due = null;
+    if (dueDate !== undefined) {
+      if (dueDate === null || dueDate === '') {
+        due = null;
+      } else {
+        const parsed = new Date(dueDate);
+        if (Number.isNaN(parsed.getTime())) return res.status(422).json({ error: 'Invalid dueDate' });
+        due = parsed;
+      }
+    }
+
+    // lines + totals
+    const normLines = Array.isArray(lines)
+      ? lines.map((l) => ({
+          description: l.description || '',
+          qty: Number(l.qty) || 0,
+          rate: Number(l.rate) || 0,
+        }))
+      : [];
     const subtotal = normLines.reduce((s, l) => s + (l.qty * l.rate), 0);
     const taxNum = Number(tax) || 0;
     const total = subtotal + taxNum;
@@ -119,7 +160,7 @@ router.post('/', async (req, res) => {
       number: number || invoiceNo || undefined,
       invoiceNo: number || invoiceNo || undefined,
       invoiceDate: invDate,
-      dueDate: dueDate || undefined,
+      dueDate: due,
       lines: normLines,
       subtotal,
       tax: taxNum,
@@ -148,23 +189,36 @@ router.post('/', async (req, res) => {
   }
 });
 
-// PUT /api/invoices/:id
+// ---- UPDATE: PUT /api/invoices/:id ----
 router.put('/:id', async (req, res) => {
   try {
-    const tenantId = req.headers['x-tenant-id'];
+    const tenantId = getTenant(req);
     if (!tenantId) return res.status(400).json({ error: 'x-tenant-id required' });
     const { id } = req.params;
     if (!isId(id)) return res.status(404).json({ error: 'Not found' });
 
     const body = req.body || {};
+    delete body.tenantId; // enforce server tenant
     const update = {};
 
     if (body.number || body.invoiceNo) {
       update.number = body.number || body.invoiceNo;
       update.invoiceNo = update.number;
     }
-    if (body.invoiceDate || body.date) update.invoiceDate = body.invoiceDate || body.date;
-    if (body.dueDate !== undefined) update.dueDate = body.dueDate || null;
+    if (body.invoiceDate || body.date) {
+      const d = new Date(body.invoiceDate || body.date);
+      if (Number.isNaN(d.getTime())) return res.status(422).json({ error: 'Invalid invoiceDate/date' });
+      update.invoiceDate = d;
+    }
+    if (body.dueDate !== undefined) {
+      if (body.dueDate === null || body.dueDate === '') {
+        update.dueDate = null;
+      } else {
+        const dd = new Date(body.dueDate);
+        if (Number.isNaN(dd.getTime())) return res.status(422).json({ error: 'Invalid dueDate' });
+        update.dueDate = dd;
+      }
+    }
 
     if (Array.isArray(body.lines)) {
       const normLines = body.lines.map((l) => ({
@@ -190,7 +244,14 @@ router.put('/:id', async (req, res) => {
 
     if (body.customerId && isId(body.customerId)) {
       update.customerId = body.customerId;
-      if (body.customerName !== undefined) update.customerName = String(body.customerName || '').trim();
+      if (body.customerName !== undefined) {
+        update.customerName = String(body.customerName || '').trim();
+      } else if (Customer?.findOne) {
+        // backfill name from customer if not provided
+        const c = await Customer.findOne({ _id: body.customerId, tenantId }).select('name Name displayName').lean();
+        const name = c?.name || c?.Name || c?.displayName;
+        if (name) update.customerName = name;
+      }
     } else if (body.customerName !== undefined) {
       update.customerName = String(body.customerName || '').trim();
       update.customerId = undefined;
@@ -225,10 +286,10 @@ router.put('/:id', async (req, res) => {
   }
 });
 
-// DELETE /api/invoices/:id
+// ---- DELETE: DELETE /api/invoices/:id ----
 router.delete('/:id', async (req, res) => {
   try {
-    const tenantId = req.headers['x-tenant-id'];
+    const tenantId = getTenant(req);
     if (!tenantId) return res.status(400).json({ error: 'x-tenant-id required' });
     const { id } = req.params;
     if (!isId(id)) return res.status(404).json({ error: 'Not found' });

@@ -40,17 +40,46 @@ r.get('/', async (req, res, next) => {
  */
 r.post('/', async (req, res, next) => {
   try {
-    const tenantId = req.tenantId;
-    const { name, price } = req.body || {};
-    if (!name || typeof price !== 'number')
-      return res.status(422).json({ error: 'name and numeric price are required' });
+    const tenantId = req.tenantId; // now set by middleware
+    const {
+      name,
+      price,
+      sku,
+      unit,
+      stock,
+      taxPct,
+      hsn,
+      desc,
+      isActive
+    } = req.body || {};
 
-    const doc = await Product.create({ tenantId, ...req.body });
-    res.status(201).json(doc);
+    const priceNum = Number(price);
+    if (!name || Number.isNaN(priceNum)) {
+      return res.status(422).json({ error: 'name and numeric price are required' });
+    }
+
+    const payload = {
+      tenantId,
+      name: String(name).trim(),
+      price: priceNum,
+    };
+
+    if (sku != null)       payload.sku = String(sku).trim();
+    if (unit != null)      payload.unit = String(unit).trim();
+    if (hsn != null)       payload.hsn = String(hsn).trim();
+    if (desc != null)      payload.desc = String(desc);
+    if (isActive != null)  payload.isActive = Boolean(isActive);
+
+    const stockNum   = stock   == null ? undefined : Number(stock);
+    const taxPctNum  = taxPct  == null ? undefined : Number(taxPct);
+    if (stockNum != null && !Number.isNaN(stockNum))   payload.stock = stockNum;
+    if (taxPctNum != null && !Number.isNaN(taxPctNum)) payload.taxPct = taxPctNum;
+
+    const doc = await Product.create(payload);
+    return res.status(201).json(doc);
   } catch (e) {
-    // Surface duplicate key nicely (unique index on tenantId+name)
     if (e?.code === 11000) {
-      return res.status(409).json({ error: 'Product with this name already exists for this tenant' });
+      return res.status(409).json({ error: 'Product already exists for this tenant (unique constraint)' });
     }
     next(e);
   }

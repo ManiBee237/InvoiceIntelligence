@@ -246,7 +246,7 @@ export default function Login() {
                             <IconTenant />
                             <input
                               className={inClass(slugErr)}
-                              placeholder="tenant slug (e.g. demo, acme-co)"
+                              placeholder="tenant Name"
                               value={tenant}
                               onChange={(e) => setTenant(e.target.value)}
                             />
@@ -399,14 +399,14 @@ export default function Login() {
                             />
                             Keep me signed in
                           </label>
-                          {mode === "signin" && (
+                          {/* {mode === "signin" && (
                             <a
                               href="#/login"
                               className="text-sky-700 hover:underline"
                             >
                               Forgot password?
                             </a>
-                          )}
+                          )} */}
                         </div>
 
                         <motion.button

@@ -1,0 +1,188 @@
+[
+  {
+    "_collection": "tenants",
+    "slug": "mani",
+    "name": "Mani Pvt Ltd",
+    "currency": "INR",
+    "timezone": "Asia/Kolkata",
+    "createdAt": "2025-10-10T05:09:00.000Z",
+    "updatedAt": "2025-10-10T05:09:00.000Z"
+  },
+  {
+    "_collection": "vendors",
+    "tenantId": "mani",
+    "name": "Acme Supplies",
+    "email": "sales@acme.in",
+    "phone": "9876543210",
+    "gstin": "29AACCA2803P1ZP",
+    "billing": { "address": "123 Mount Road", "city": "Chennai", "state": "TN", "pincode": "600018" },
+    "shipping": { "address": "Plot 45, SIDCO Industrial Estate, Guindy", "city": "Chennai", "state": "TN", "pincode": "600032" },
+    "notes": "Preferred electronics vendor",
+    "isActive": true,
+    "createdAt": "2025-10-12T08:00:00.000Z",
+    "updatedAt": "2025-10-12T08:00:00.000Z"
+  },
+  {
+    "_collection": "vendors",
+    "tenantId": "mani",
+    "name": "Bright Office Solutions",
+    "email": "info@brightoffice.com",
+    "phone": "9900112233",
+    "gstin": "33AAGCB9982P1ZF",
+    "billing": { "address": "No.22, Anna Nagar", "city": "Madurai", "state": "TN", "pincode": "625020" },
+    "shipping": { "address": "Warehouse #3, Thiru Nagar", "city": "Madurai", "state": "TN", "pincode": "625018" },
+    "notes": "Stationery and office supplies",
+    "isActive": true,
+    "createdAt": "2025-10-13T09:30:00.000Z",
+    "updatedAt": "2025-10-13T09:30:00.000Z"
+  },
+  {
+    "_collection": "customers",
+    "tenantId": "mani",
+    "name": "Partha Traders",
+    "email": "accounts@parthatraders.in",
+    "phone": "9000456711",
+    "gstin": "27AACCP1111L1Z3",
+    "address": "12 Gandhi Road, Tenkasi, Tamil Nadu 627811",
+    "city": "Tenkasi",
+    "state": "TN",
+    "isActive": true,
+    "createdAt": "2025-10-12T07:00:00.000Z",
+    "updatedAt": "2025-10-12T07:00:00.000Z"
+  },
+  {
+    "_collection": "customers",
+    "tenantId": "mani",
+    "name": "Sana Enterprises",
+    "email": "sana.ent@gmail.com",
+    "phone": "9442277123",
+    "gstin": "29BBBCS7771N1ZZ",
+    "address": "45 Gandhi Nagar, Coimbatore, TN",
+    "city": "Coimbatore",
+    "state": "TN",
+    "isActive": true,
+    "createdAt": "2025-10-12T07:30:00.000Z",
+    "updatedAt": "2025-10-12T07:30:00.000Z"
+  },
+  {
+    "_collection": "products",
+    "tenantId": "mani",
+    "name": "Steel Water Bottle",
+    "sku": "STB1001",
+    "price": 450,
+    "gstPct": 18,
+    "unit": "piece",
+    "stock": 250,
+    "category": "Household",
+    "isActive": true
+  },
+  {
+    "_collection": "products",
+    "tenantId": "mani",
+    "name": "A4 Paper Box",
+    "sku": "STA4001",
+    "price": 240,
+    "gstPct": 12,
+    "unit": "box",
+    "stock": 150,
+    "category": "Stationery",
+    "isActive": true
+  },
+  {
+    "_collection": "invoices",
+    "tenantId": "mani",
+    "number": "INV-202510-8689",
+    "date": "2025-10-05T00:00:00.000Z",
+    "dueDate": "2025-10-09T00:00:00.000Z",
+    "customerName": "Partha Traders",
+    "customerId": "68eddfaef6a3129a2a8972ff",
+    "status": "Overdue",
+    "total": 98888,
+    "balance": 98888,
+    "gst": 18,
+    "gstAmount": 15088,
+    "items": [
+      { "description": "Steel Water Bottle", "qty": 200, "unitPrice": 420, "gstPct": 18 },
+      { "description": "A4 Paper Box", "qty": 50, "unitPrice": 240, "gstPct": 12 }
+    ],
+    "createdAt": "2025-10-05T06:30:00.000Z",
+    "updatedAt": "2025-10-15T07:45:00.000Z"
+  },
+  {
+    "_collection": "invoices",
+    "tenantId": "mani",
+    "number": "INV-202510-903",
+    "date": "2025-10-11T00:00:00.000Z",
+    "dueDate": "2025-10-25T00:00:00.000Z",
+    "customerName": "Sana Enterprises",
+    "status": "Sent",
+    "total": 17726,
+    "balance": 17726,
+    "gst": 12,
+    "gstAmount": 1902,
+    "items": [
+      { "description": "A4 Paper Box", "qty": 70, "unitPrice": 220, "gstPct": 12 }
+    ],
+    "createdAt": "2025-10-11T10:10:00.000Z",
+    "updatedAt": "2025-10-11T10:10:00.000Z"
+  },
+  {
+    "_collection": "payments",
+    "tenantId": "mani",
+    "invoiceNumber": "INV-202510-8689",
+    "customerName": "Partha Traders",
+    "amount": 20000,
+    "date": "2025-10-12T00:00:00.000Z",
+    "method": "Bank Transfer",
+    "notes": "Part payment for invoice INV-202510-8689",
+    "createdAt": "2025-10-12T08:00:00.000Z",
+    "updatedAt": "2025-10-12T08:00:00.000Z"
+  },
+  {
+    "_collection": "payments",
+    "tenantId": "mani",
+    "invoiceNumber": "INV-202510-903",
+    "customerName": "Sana Enterprises",
+    "amount": 5000,
+    "date": "2025-10-15T00:00:00.000Z",
+    "method": "UPI",
+    "notes": "Advance for October supplies",
+    "createdAt": "2025-10-15T09:00:00.000Z",
+    "updatedAt": "2025-10-15T09:00:00.000Z"
+  },
+  {
+    "_collection": "bills",
+    "tenantId": "mani",
+    "vendorName": "Acme Supplies",
+    "number": "BILL-202510-2211",
+    "date": "2025-10-07T00:00:00.000Z",
+    "due": "2025-10-27T00:00:00.000Z",
+    "status": "Open",
+    "amount": 57000,
+    "balance": 57000,
+    "total": 57000,
+    "items": [
+      { "description": "Bulk Bottle Stock", "qty": 100, "unitPrice": 500 },
+      { "description": "Packaging Material", "qty": 10, "unitPrice": 200 }
+    ],
+    "createdAt": "2025-10-07T07:00:00.000Z",
+    "updatedAt": "2025-10-07T07:00:00.000Z"
+  },
+  {
+    "_collection": "bills",
+    "tenantId": "mani",
+    "vendorName": "Bright Office Solutions",
+    "number": "BILL-202510-3444",
+    "date": "2025-09-30T00:00:00.000Z",
+    "due": "2025-10-10T00:00:00.000Z",
+    "status": "Overdue",
+    "amount": 24000,
+    "balance": 24000,
+    "total": 24000,
+    "items": [
+      { "description": "Printer Ink Cartridges", "qty": 20, "unitPrice": 1200 }
+    ],
+    "createdAt": "2025-09-30T06:00:00.000Z",
+    "updatedAt": "2025-10-14T06:00:00.000Z"
+  }
+]

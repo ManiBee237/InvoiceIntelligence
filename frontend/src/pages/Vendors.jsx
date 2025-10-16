@@ -11,12 +11,13 @@ import { api } from '../lib/api'
 function validateVendor(values) {
   const e = {}
   if (!values.name) e.name = 'Name required'
-  if (!values.address) e.address = 'Address/City required'
+  // if (!values.address) e.address = 'Address/City required'
   return e
 }
 
 /* ------------------------------ API ------------------------------ */
-const listVendors  = async (q='') => api(`/api/vendors${q ? `?q=${encodeURIComponent(q)}` : ''}`)
+// NOTE: backend expects ?search=... (not ?q=...)
+const listVendors  = async (search='') => api(`/api/vendors${search ? `?search=${encodeURIComponent(search)}` : ''}`)
 const createVendor = async (body) => api('/api/vendors', { method: 'POST', body })
 const updateVendor = async (id, body) => api(`/api/vendors/${encodeURIComponent(id)}`, { method: 'PUT', body })
 const deleteVendor = async (id) => api(`/api/vendors/${encodeURIComponent(id)}`, { method: 'DELETE' })
@@ -25,6 +26,34 @@ const deleteVendor = async (id) => api(`/api/vendors/${encodeURIComponent(id)}`,
 const createBill = async (body) => api('/api/bills', { method: 'POST', body })
 
 const genVendorId = () => `VN-${Date.now().toString().slice(-6)}-${Math.floor(Math.random()*9000+1000)}`
+
+/* -------------------------- Address helper -------------------------- */
+function computeAddress(v = {}) {
+  const join = (o = {}) =>
+    [o.address, o.line1, o.line2, o.city, o.state, o.zip || o.pincode]
+      .filter(Boolean)
+      .join(', ')
+  return (
+    v.address ||
+    v.billing?.address || join(v.billing) ||
+    v.shipping?.address || join(v.shipping) ||
+    ''
+  )
+}
+
+// Normalize a vendor record from API for the table
+function mapFromApi(v) {
+  return {
+    id: v.id || v._id,
+    name: v.name || v.displayName || v.Name || '',
+    email: v.email || '',
+    phone: v.phone || '',
+    gstin: v.gstin || '',
+    address: computeAddress(v),          // ✅ derive display address
+    isActive: v.isActive !== false,
+    _raw: v,
+  }
+}
 
 export default function Vendors() {
   const [rows, setRows] = useState([])
@@ -43,7 +72,7 @@ export default function Vendors() {
     ;(async () => {
       try {
         const data = await listVendors(q.trim())
-        if (alive) setRows(Array.isArray(data) ? data : [])
+        if (alive) setRows((Array.isArray(data) ? data : []).map(mapFromApi))
       } catch (e) {
         console.error(e)
         notify.error('Failed to load vendors', e.message || 'Try again')
@@ -53,7 +82,7 @@ export default function Vendors() {
   }, [q])
 
   const filtered = useMemo(() => {
-    // server already filters by ?q — this is just an extra guard for UX
+    // server already filters by ?search — this is just an extra guard for UX
     let list = rows
     if (q.trim()) {
       const s = q.toLowerCase()
@@ -85,7 +114,7 @@ export default function Vendors() {
 
   const openCreate = () => {
     setFormInitial({
-      id: genVendorId(),        // UI code (maps to vendor.code in backend)
+      id: genVendorId(),        // UI code (maps to vendor.code in backend if you use it)
       name: '',
       address: '',
       email: '',
@@ -95,7 +124,12 @@ export default function Vendors() {
     setFormErrors({})
     setFormOpen(true)
   }
-  const openEdit = (row) => { setFormInitial({ ...row }); setFormErrors({}); setFormOpen(true) }
+  const openEdit = (row) => {
+    // ensure address shows in form even if only nested billing/shipping exists
+    setFormInitial({ ...row, address: row.address || computeAddress(row._raw || {}) })
+    setFormErrors({})
+    setFormOpen(true)
+  }
 
   const submitForm = async () => {
     const errors = validateVendor(formInitial || {})
@@ -103,9 +137,12 @@ export default function Vendors() {
     if (Object.keys(errors).length) return
 
     const isEdit = !!rows.find(r => (r.id || r._id) === (formInitial.id || formInitial._id))
+    // Make sure we send a flat `address`; your backend mirrors it into billing.address
+    const payload = { ...formInitial, address: formInitial.address || '' }
+
     const p = isEdit
-      ? updateVendor(formInitial.id || formInitial._id, formInitial)
-      : createVendor(formInitial)
+      ? updateVendor(formInitial.id || formInitial._id, payload)
+      : createVendor(payload)
 
     notify.promise(p, {
       pending: { title: isEdit ? 'Saving…' : 'Adding vendor…' },
@@ -115,10 +152,11 @@ export default function Vendors() {
 
     try {
       const res = await p
-      const key = res.id || res._id
+      const mapped = mapFromApi(res)
+      const key = mapped.id
       const idx = rows.findIndex(r => (r.id || r._id) === key)
       const next = [...rows]
-      if (idx >= 0) next[idx] = res; else next.unshift(res)
+      if (idx >= 0) next[idx] = mapped; else next.unshift(mapped)
       setRows(next)
 
       // Optionally create a starter bill for new vendors (non-blocking UX)
@@ -128,13 +166,13 @@ export default function Vendors() {
           const due   = new Date(today.getTime() + 30*24*60*60*1000) // +30 days
           await createBill({
             id: `BILL-${Date.now().toString().slice(-6)}-${Math.floor(Math.random()*9000+1000)}`,
-            vendor: res.name,              // backend links vendorId by name/code if available
+            vendor: mapped.name,
             date: today.toISOString().slice(0,10),
             due:  due.toISOString().slice(0,10),
             amount: 0,
             status: 'Open',
           })
-          notify.info('Starter bill created', `${res.name} • due in 30 days`)
+          notify.info('Starter bill created', `${mapped.name} • due in 30 days`)
         } catch (e) {
           console.warn('Starter bill create failed:', e)
         }
@@ -175,7 +213,7 @@ export default function Vendors() {
           columns={[
             { key: 'id', header: 'ID', render: (r)=> r.id || r._id },
             { key: 'name', header: 'Name' },
-            { key: 'address', header: 'Address' },
+            // { key: 'address', header: 'Address', render: (r) => r.address || '—' },
             { key: 'email', header: 'Email' },
             { key: 'phone', header: 'Phone' },
             { key: 'gstin', header: 'GSTIN' },
@@ -223,13 +261,13 @@ export default function Vendors() {
                 onChange={(e)=>setFormInitial({ ...formInitial, name: e.target.value })}
               />
             </Field>
-            <Field label="Address / City" error={formErrors.address}>
+            {/* <Field label="Address / City" error={formErrors.address}>
               <input
                 className={inClass(formErrors.address)}
                 value={formInitial.address || ''}
                 onChange={(e)=>setFormInitial({ ...formInitial, address: e.target.value })}
               />
-            </Field>
+            </Field> */}
             <Field label="Email">
               <input
                 className={inClass()}

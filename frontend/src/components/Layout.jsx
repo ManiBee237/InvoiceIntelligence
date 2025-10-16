@@ -279,7 +279,7 @@ export default function Layout({ children }) {
         <div className="px-2 pt-4 pb-8">
           {/* — PRIMARY — */}
           <div className="px-2">
-            <div className="text-[13px] font-semibold uppercase tracking-wide text-slate-600 mt-2 mb-2">
+            <div className="text-[13px] font-semibold uppercase tracking-wide text-blue-500 mt-2 mb-2">
               Primary
             </div>
             <div className="relative pl-4">
@@ -319,7 +319,7 @@ export default function Layout({ children }) {
 
           {/* — OPERATIONS — */}
           <div className="px-2">
-            <div className="text-[13px] font-semibold uppercase tracking-wide text-slate-600 mt-5 mb-2">
+            <div className="text-[13px] font-semibold uppercase tracking-wide text-yellow-600 mt-5 mb-2">
               Operations
             </div>
             <div className="relative pl-4">
@@ -341,7 +341,7 @@ export default function Layout({ children }) {
 
           {/* — ANALYTICS & AI — */}
           <div className="px-2">
-            <div className="text-[13px] font-semibold uppercase tracking-wide text-slate-600 mt-5 mb-2">
+            <div className="text-[13px] font-semibold uppercase tracking-wide text-green-600 mt-5 mb-2">
               Analytics & AI
             </div>
             <div className="relative pl-4">
@@ -375,18 +375,18 @@ export default function Layout({ children }) {
 
           {/* — ACCOUNT — (replaces Settings) */}
           <div className="px-2">
-            <div className="text-[13px] font-semibold uppercase tracking-wide text-slate-600 mt-5 mb-2">
+            <div className="text-[13px] font-semibold uppercase tracking-wide text-red-600 mt-5 mb-2">
               Account
             </div>
             <div className="relative pl-4">
-              <div className="absolute left-0 top-0 bottom-0 w-px bg-slate-200 text" />
+              <div className="absolute left-0 top-0 bottom-0 w-px bg-slate-200 text-red-500" />
               <Leaf
                 href="#/profile"
                 label="Profile"
                 icon="user"
                 current={is("#/profile")}
               />
-              <Leaf label="Logout" icon="power" onClick={doLogout} />
+              <Leaf label="Logout" icon="power" className="text-red-500" onClick={doLogout} />
             </div>
           </div>
         </div>

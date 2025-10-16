@@ -6,19 +6,46 @@ function readAuth() {
   catch { return {}; }
 }
 
-// optional helpers to set/get tenant quickly
+/** Persist/override the active tenant slug (lowercased) */
 export function setTenant(slug) {
-  localStorage.setItem('tenant', slug);
+  if (!slug) return;
+  localStorage.setItem('tenant', String(slug).trim().toLowerCase());
 }
+
+/** Get the active tenant *slug* (never an _id). */
 export function getTenant() {
   const auth = readAuth();
-  return auth?.tenant?._id || auth?.tenant?.slug || localStorage.getItem('tenant') || 'demo';
+  // Prefer slug from auth payload if present
+  const slugFromAuth =
+    (auth?.tenant?.slug && String(auth.tenant.slug).trim().toLowerCase()) || null;
+
+  // Fall back to localStorage
+  const slugFromStorage =
+    (localStorage.getItem('tenant') && String(localStorage.getItem('tenant')).trim().toLowerCase()) || null;
+
+  // Final fallback: set nothing (so server returns a clear 400 instead of silently using a wrong tenant)
+  const slug = slugFromAuth || slugFromStorage || '';
+
+  return slug;
+}
+
+/**
+ * Optional helper to call *after successful login/register*.
+ * Pass the API response you store in localStorage as `auth`.
+ * It extracts and persists the tenant slug so subsequent calls work.
+ */
+export function setTenantFromAuth(auth) {
+  try {
+    const slug =
+      (auth?.tenant?.slug && String(auth.tenant.slug).trim().toLowerCase()) || null;
+    if (slug) setTenant(slug);
+  } catch {}
 }
 
 export async function api(path, { method = 'GET', body, headers = {} } = {}) {
   const auth   = readAuth();
   const token  = auth?.token;
-  const tenant = getTenant();           // <-- uses helper
+  const tenant = getTenant();           // <-- slug only (e.g., 'mani')
   const userId = auth?.user?._id;
 
   const res = await fetch(`${API_BASE}${path}`, {
@@ -27,7 +54,7 @@ export async function api(path, { method = 'GET', body, headers = {} } = {}) {
     headers: {
       'Content-Type': 'application/json',
       ...(token  ? { Authorization: `Bearer ${token}` } : {}),
-      ...(tenant ? { 'x-tenant-id': tenant } : {}),
+      ...(tenant ? { 'x-tenant-id': tenant } : {}), // always slug, lowercased
       ...(userId ? { 'x-user-id': userId } : {}),
       ...headers,
     },
@@ -57,32 +84,42 @@ export const http = {
   // Customers
   listCustomers: (tenant, { search = '', page = 1, limit = 20 } = {}) =>
     api(`/api/customers?search=${encodeURIComponent(search)}&page=${page}&limit=${limit}`, {
-      headers: tenant ? { 'x-tenant-id': tenant } : undefined,
+      headers: tenant ? { 'x-tenant-id': String(tenant).toLowerCase() } : undefined,
     }),
   createCustomer: (tenant, doc) =>
-    api('/api/customers', { method: 'POST', body: doc, headers: tenant ? { 'x-tenant-id': tenant } : undefined }),
+    api('/api/customers', { method: 'POST', body: doc, headers: tenant ? { 'x-tenant-id': String(tenant).toLowerCase() } : undefined }),
 
   // Invoices
   listInvoices: (tenant, params = {}) => {
     const qs = new URLSearchParams(params).toString();
     return api(`/api/invoices${qs ? `?${qs}` : ''}`, {
-      headers: tenant ? { 'x-tenant-id': tenant } : undefined,
+      headers: tenant ? { 'x-tenant-id': String(tenant).toLowerCase() } : undefined,
     });
   },
   createInvoice: (tenant, doc) =>
-    api('/api/invoices', { method: 'POST', body: doc, headers: tenant ? { 'x-tenant-id': tenant } : undefined }),
+    api('/api/invoices', { method: 'POST', body: doc, headers: tenant ? { 'x-tenant-id': String(tenant).toLowerCase() } : undefined }),
 
   // Products
   listProducts: (tenant, params = {}) => {
     const qs = new URLSearchParams(params).toString();
     return api(`/api/products${qs ? `?${qs}` : ''}`, {
-      headers: tenant ? { 'x-tenant-id': tenant } : undefined,
+      headers: tenant ? { 'x-tenant-id': String(tenant).toLowerCase() } : undefined,
     });
   },
   createProduct: (tenant, doc) =>
-    api('/api/products', { method: 'POST', body: doc, headers: tenant ? { 'x-tenant-id': tenant } : undefined }),
+    api('/api/products', { method: 'POST', body: doc, headers: tenant ? { 'x-tenant-id': String(tenant).toLowerCase() } : undefined }),
+
+  // Vendors (you mentioned these)
+  listVendors: (tenant, params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return api(`/api/vendors${qs ? `?${qs}` : ''}`, {
+      headers: tenant ? { 'x-tenant-id': String(tenant).toLowerCase() } : undefined,
+    });
+  },
+  createVendor: (tenant, doc) =>
+    api('/api/vendors', { method: 'POST', body: doc, headers: tenant ? { 'x-tenant-id': String(tenant).toLowerCase() } : undefined }),
 
   // Bootstrap
   bootstrap: (tenant) =>
-    api('/api/bootstrap', { headers: tenant ? { 'x-tenant-id': tenant } : undefined }),
+    api('/api/bootstrap', { headers: tenant ? { 'x-tenant-id': String(tenant).toLowerCase() } : undefined }),
 };
