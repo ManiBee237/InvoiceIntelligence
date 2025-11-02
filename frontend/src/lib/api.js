@@ -42,41 +42,57 @@ export function setTenantFromAuth(auth) {
   } catch {}
 }
 
-export async function api(path, { method = 'GET', body, headers = {} } = {}) {
-  const auth   = readAuth();
-  const token  = auth?.token;
-  const tenant = getTenant();           // <-- slug only (e.g., 'mani')
-  const userId = auth?.user?._id;
+// lib/api.js
+export async function api(url, opts = {}) {
+  const base = import.meta.env.VITE_API_BASE || ""; // or ""
+  const o = {
+    method: opts.method || "GET",
+    credentials: opts.credentials ?? "include", // include cookies by default if you want sessions
+    headers: Object.assign({}, opts.headers || {}),
+  };
 
-  const res = await fetch(`${API_BASE}${path}`, {
-    method,
-    credentials: 'include',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token  ? { Authorization: `Bearer ${token}` } : {}),
-      ...(tenant ? { 'x-tenant-id': tenant } : {}), // always slug, lowercased
-      ...(userId ? { 'x-user-id': userId } : {}),
-      ...headers,
-    },
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
-
-  // robust parse without double-reading
-  const contentType = res.headers.get('content-type') || '';
-  const isJSON = contentType.includes('application/json');
-  const payload = res.status === 204 ? null : (isJSON ? await res.json().catch(() => ({})) : await res.text());
-
-  if (!res.ok) {
-    const error = new Error(
-      (isJSON && payload?.error) || (typeof payload === 'string' && payload) || res.statusText || 'Request failed'
-    );
-    error.status = res.status;
-    error.data = payload;
-    error.path = path;
-    throw error;
+  // If caller provided a body as an object, stringify + set content-type
+  if (opts.body !== undefined && typeof opts.body === "object" && !(opts.body instanceof FormData)) {
+    o.headers["Content-Type"] = o.headers["Content-Type"] || "application/json";
+    o.body = JSON.stringify(opts.body);
+  } else if (opts.body !== undefined) {
+    // body is already a string or FormData
+    o.body = opts.body;
   }
 
-  return payload;
+  // If the caller passed tenant in opts.tenant or opts.body.tenant, set x-tenant-id header
+  const tenant =
+    opts.headers?.["x-tenant-id"] ||
+    opts.headers?.["X-Tenant-Id"] ||
+    opts.tenant ||
+    (opts.body && opts.body.tenant) ||
+    localStorage.getItem("tenant") ||
+    null;
+
+  if (tenant) {
+    o.headers["x-tenant-id"] = tenant;
+  }
+
+  const resp = await fetch(base + url, o);
+
+  // helpful: try to parse JSON response; else give clearer error
+  const text = await resp.text();
+  let data;
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    throw new Error(`Invalid JSON response (status ${resp.status})`);
+  }
+
+  if (!resp.ok) {
+    const msg = data.error || data.message || `Request failed: ${resp.status}`;
+    const err = new Error(msg);
+    err.status = resp.status;
+    err.body = data;
+    throw err;
+  }
+
+  return data;
 }
 
 // ---------- Convenience endpoints (typed-ish wrappers) ----------

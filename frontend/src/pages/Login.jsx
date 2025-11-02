@@ -240,21 +240,21 @@ export default function Login() {
                         {/* Tenant slug */}
                         <div className="space-y-1">
                           <label className="text-xs text-slate-600">
-                            Tenant
+                            Username
                           </label>
                           <div className="relative">
                             <IconTenant />
                             <input
                               className={inClass(slugErr)}
-                              placeholder="tenant Name"
+                              placeholder="Username"
                               value={tenant}
                               onChange={(e) => setTenant(e.target.value)}
                             />
                           </div>
-                          <p className="text-[11px] text-slate-500">
+                          {/* <p className="text-[11px] text-slate-500">
                             Used to scope your data (sent as{" "}
                             <code className="font-mono">x-tenant-id</code>).
-                          </p>
+                          </p> */}
                           {slugErr && (
                             <p className="text-[11px] text-rose-600">
                               {slugErr}
@@ -266,7 +266,7 @@ export default function Login() {
                           <>
                             <div className="space-y-1">
                               <label className="text-xs text-slate-600">
-                                Business / Tenant name
+                                Business name
                               </label>
                               <div className="relative">
                                 <IconBuilding />
