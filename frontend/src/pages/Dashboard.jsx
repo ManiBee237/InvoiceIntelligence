@@ -11,7 +11,6 @@ const toDate = (d) => (d ? new Date(d) : null)
 const isWithin = (d, from, to) => !!d && d >= from && d <= to
 const sum = (arr, f = (x) => x) => (Array.isArray(arr) ? arr.reduce((a, b) => a + (Number(f(b)) || 0), 0) : 0)
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v))
-const todayISO = () => new Date().toISOString().slice(0,10)
 const title = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1).toLowerCase() : s)
 
 /* viz */
@@ -70,17 +69,11 @@ const normInvoice = (x) => ({
   total: Number(x.total) || 0,
   date: x.date || x.invoiceDate || x.createdAt || null,
   dueDate: x.dueDate || null,
-  // statuses vary; keep raw and a lc copy
   statusRaw: x.status || '',
   statusLc: (x.status || '').toLowerCase(),
 })
-const normPayment = (p) => ({
-  id: p.id || p._id,
-  customer: p.customer || p.customerName || '',
-  amount: Number(p.amount) || 0,
-  date: p.date || p.createdAt || null,
-  method: p.method || 'Bank',
-})
+
+/* Bills: keep raw; derive status later */
 const normBill = (b) => ({
   id: b.id || b._id,
   billNo: b.billNo || '',
@@ -88,7 +81,10 @@ const normBill = (b) => ({
   date: b.billDate || b.createdAt || null,
   dueDate: b.dueDate || null,
   amount: Number(b.total ?? b.amount ?? 0) || 0,
-  status: title(b.status) || 'Open', // show Title Case
+  statusRaw: b.status || '',           // keep whatever backend sends
+  statusLc: (b.status || '').toLowerCase(),
+  paid: !!b.paid,
+  paidAmount: Number(b.paidAmount) || 0,
 })
 
 /* classify invoice by dates + status */
@@ -97,6 +93,26 @@ function classifyInvoices(inv) {
   const paid = inv.filter(i => i.statusLc === 'paid')
   const overdue = inv.filter(i => i.statusLc !== 'paid' && i.dueDate && toDate(i.dueDate) < todayMid)
   const open = inv.filter(i => i.statusLc !== 'paid' && (!i.dueDate || toDate(i.dueDate) >= todayMid))
+  return { open, overdue, paid }
+}
+
+/* derive bill status: Paid > Overdue > Open */
+function deriveBillStatus(b) {
+  const isPaid = b.statusLc === 'paid' || b.paid === true || (b.paidAmount >= (Number(b.amount) || 0))
+  if (isPaid) return 'Paid'
+  const todayMid = new Date(new Date().toDateString())
+  const due = toDate(b.dueDate)
+  if (due && due < todayMid) return 'Overdue'
+  return 'Open'
+}
+function classifyBills(bills) {
+  const open = [], overdue = [], paid = []
+  for (const b of bills) {
+    const s = deriveBillStatus(b)
+    if (s === 'Paid') paid.push(b)
+    else if (s === 'Overdue') overdue.push(b)
+    else open.push(b)
+  }
   return { open, overdue, paid }
 }
 
@@ -119,7 +135,6 @@ export default function Dashboard() {
     let alive = true
     ;(async () => {
       try {
-        // fetch EVERYTHING; no status filters (avoids 422)
         const [allInv, pays, bls] = await Promise.all([
           api('/api/invoices?limit=500'),
           api('/api/payments?limit=500'),
@@ -127,7 +142,13 @@ export default function Dashboard() {
         ])
         if (!alive) return
         setInvoices((Array.isArray(allInv) ? allInv : []).map(normInvoice))
-        setPayments((Array.isArray(pays) ? pays : []).map(normPayment))
+        setPayments((Array.isArray(pays) ? pays : []).map(p => ({
+          id: p.id || p._id,
+          customer: p.customer || p.customerName || '',
+          amount: Number(p.amount) || 0,
+          date: p.date || p.createdAt || null,
+          method: p.method || 'Bank',
+        })))
         setBills((Array.isArray(bls) ? bls : []).map(normBill))
       } catch (e) {
         if (alive) setError(e?.message || 'Failed to load dashboard')
@@ -142,6 +163,10 @@ export default function Dashboard() {
   const { open: openInv, overdue: overdueInv, paid: paidInv } = useMemo(
     () => classifyInvoices(invoices),
     [invoices]
+  )
+  const { open: openBills, overdue: overdueBills, paid: paidBills } = useMemo(
+    () => classifyBills(bills),
+    [bills]
   )
 
   /* range filters */
@@ -160,8 +185,8 @@ export default function Dashboard() {
   const overdueAmt   = sum(overdueInv, (i)=>i.total)
   const paidAmt      = sum(paidInv, (i)=>i.total)
 
-  const apOpenAmt    = sum(bills.filter(b => b.status === 'Open'), (b)=>b.amount)
-  const apOverdueCnt = bills.filter(b => b.status === 'Overdue').length
+  const apOpenAmt    = sum(openBills, (b)=>b.amount)
+  const apOverdueCnt = overdueBills.length
 
   const cashIn = sum(payInRange, (p)=> p.amount)
   const collectible = paidAmt + arOpenAmt + overdueAmt
@@ -251,9 +276,9 @@ export default function Dashboard() {
           <CardHeader title="Accounts Payable snapshot" subtitle="Totals by status" />
           <CardBody>
             <ul className="text-sm space-y-2">
-              <li className="flex justify-between"><span>Open</span><span className="font-medium">{inr(sum(bills.filter(b=>b.status==='Open'), b=>b.amount))}</span></li>
-              <li className="flex justify-between"><span>Overdue</span><span className="font-medium">{inr(sum(bills.filter(b=>b.status==='Overdue'), b=>b.amount))}</span></li>
-              <li className="flex justify-between"><span>Paid</span><span className="font-medium">{inr(sum(bills.filter(b=>b.status==='Paid'), b=>b.amount))}</span></li>
+              <li className="flex justify-between"><span>Open</span><span className="font-medium">{inr(sum(openBills, b=>b.amount))}</span></li>
+              <li className="flex justify-between"><span>Overdue</span><span className="font-medium">{inr(sum(overdueBills, b=>b.amount))}</span></li>
+              <li className="flex justify-between"><span>Paid</span><span className="font-medium">{inr(sum(paidBills, b=>b.amount))}</span></li>
             </ul>
           </CardBody>
         </Card>
@@ -378,29 +403,32 @@ export default function Dashboard() {
                   {upcomingBills.length === 0 && (
                     <tr><td colSpan="6" className="p-6 text-center text-slate-500">{loading ? 'Loading…' : 'No upcoming bills'}</td></tr>
                   )}
-                  {upcomingBills.map(b => (
-                    <tr key={b.id} className="hover:bg-slate-50">
-                      <td className="py-3 px-3"><a className="text-sky-700 hover:underline" href={`#/bills?status=${b.status||'Open'}`}>{b.billNo || b.id.slice(-6)}</a></td>
-                      <td className="py-3 px-3">{b.vendorName}</td>
-                      <td className="py-3 px-3">{dd(b.dueDate)}</td>
-                      <td className="py-3 px-3 text-right">{inr(b.amount)}</td>
-                      <td className="py-3 px-3">
-                        <span className={
-                          'inline-flex items-center rounded-full px-2 py-0.5 text-xs border ' +
-                          (b.status === 'Paid'
-                            ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
-                            : b.status === 'Overdue'
-                            ? 'bg-rose-50 text-rose-700 border-rose-200'
-                            : 'bg-amber-50 text-amber-700 border-amber-200')
-                        }>
-                          {b.status}
-                        </span>
-                      </td>
-                      <td className="py-3 px-3 text-right">
-                        <a href="#/payments#new" className="text-emerald-700 hover:underline">Pay</a>
-                      </td>
-                    </tr>
-                  ))}
+                  {upcomingBills.map(b => {
+                    const s = deriveBillStatus(b) // "Open" | "Overdue" | "Paid"
+                    return (
+                      <tr key={b.id} className="hover:bg-slate-50">
+                        <td className="py-3 px-3"><a className="text-sky-700 hover:underline" href={`#/bills?status=${s}`}>{b.billNo || String(b.id).slice(-6)}</a></td>
+                        <td className="py-3 px-3">{b.vendorName}</td>
+                        <td className="py-3 px-3">{dd(b.dueDate)}</td>
+                        <td className="py-3 px-3 text-right">{inr(b.amount)}</td>
+                        <td className="py-3 px-3">
+                          <span className={
+                            'inline-flex items-center rounded-full px-2 py-0.5 text-xs border ' +
+                            (s === 'Paid'
+                              ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                              : s === 'Overdue'
+                              ? 'bg-rose-50 text-rose-700 border-rose-200'
+                              : 'bg-amber-50 text-amber-700 border-amber-200')
+                          }>
+                            {s}
+                          </span>
+                        </td>
+                        <td className="py-3 px-3 text-right">
+                          <a href="#/payments#new" className="text-emerald-700 hover:underline">Pay</a>
+                        </td>
+                      </tr>
+                    )
+                  })}
                 </tbody>
               </table>
             </TableWrap>

@@ -1,4 +1,8 @@
 // backend/src/server.js
+
+import dotenv from "dotenv";
+dotenv.config();
+
 import express from 'express';
 import cors from 'cors';
 import morgan from 'morgan';
@@ -56,4 +60,6 @@ app.use((req, res, next) => {
 });
 
 const port = process.env.PORT || 4000;
+console.log("Using MongoDB URI:", process.env.MONGODB_URI);
+
 app.listen(port, () => console.log(`API listening on :${port}`));

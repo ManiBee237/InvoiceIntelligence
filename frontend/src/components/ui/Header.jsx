@@ -95,7 +95,7 @@ export default function Header({ username: propUsername }) {
       <div className="flex items-center gap-3 z-10">
         <BrandLogo size={34} />
         <div className="leading-tight">
-          <div className="font-semibold tracking-wide text-base md:text-lg">Invoice AI</div>
+          <div className="font-semibold tracking-wide text-base md:text-lg">Invoice Intelligence</div>
           <div className="text-xs text-slate-300">Billing • AR • Insights</div>
         </div>
       </div>

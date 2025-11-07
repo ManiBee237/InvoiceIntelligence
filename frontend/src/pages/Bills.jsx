@@ -8,7 +8,7 @@ import { notify } from '../components/ui/Toast';
 import { inr, dd } from '../data/store';
 import { api } from '../lib/api';
 
-const STATUSES = ['draft', 'open', 'approved', 'paid', 'void'];
+const STATUSES = ['open', 'overdue', 'paid'];
 const isId = (s) => typeof s === 'string' && /^[a-f\d]{24}$/i.test(s);
 const today = () => new Date().toISOString().slice(0, 10);
 
@@ -24,19 +24,104 @@ const computeLine = (l) => {
   const qty  = Number(l?.qty ?? 0);
   const rate = Number(l?.rate ?? 0);
   const amount = (Number.isFinite(qty) ? qty : 0) * (Number.isFinite(rate) ? rate : 0);
-  return { description: String(l?.description ?? ''), qty: Number.isFinite(qty) ? qty : 0, rate: Number.isFinite(rate) ? rate : 0, amount };
+  return {
+    description: String(l?.description ?? ''),
+    qty: Number.isFinite(qty) ? qty : 0,
+    rate: Number.isFinite(rate) ? rate : 0,
+    amount
+  };
 };
+
+const sumSubtotal = (lines) => {
+  const norm = (Array.isArray(lines) ? lines : []).map(computeLine);
+  return norm.reduce((s, x) => s + (Number.isFinite(x.amount) ? x.amount : 0), 0);
+};
+
+/**
+ * computeTotals supports:
+ * - "18%" (percentage)
+ * - 0.18   (fraction)
+ * - 18     (percentage)
+ * - 50     (flat tax amount) WHEN passed as a string like "50"
+ *
+ * NOTE: In this app we store tax AMOUNT to backend. When editing an existing bill,
+ * we pre-fill the input with String(row.tax). That keeps behavior correct.
+ */
 const computeTotals = (lines, tax) => {
   const norm = (Array.isArray(lines) ? lines : []).map(computeLine);
   const subtotal = norm.reduce((s, x) => s + (Number.isFinite(x.amount) ? x.amount : 0), 0);
-  const taxNum = Number(tax ?? 0);
+
+  const raw = typeof tax === 'string' ? tax.trim() : tax;
+
+  let taxRate = null; // 0..1
+  let taxFlat = null;
+
+  if (typeof raw === 'string' && raw.endsWith('%')) {
+    const n = Number(raw.slice(0, -1));
+    taxRate = Number.isFinite(n) ? n / 100 : 0;
+  } else if (typeof raw === 'number') {
+    // Numeric inputs from the form: treat >=1 as percentage, 0-1 as fraction.
+    // (Existing rows will pass String(amount) so they won’t hit this branch.)
+    if (raw >= 1) taxRate = raw / 100;
+    else if (raw > 0 && raw < 1) taxRate = raw;
+    else taxFlat = Number.isFinite(raw) ? raw : 0;
+  } else if (typeof raw === 'string' && raw !== '') {
+    // Plain number string -> flat amount (so "50" means ₹50)
+    const n = Number(raw);
+    taxFlat = Number.isFinite(n) ? n : 0;
+  } else {
+    taxFlat = 0;
+  }
+
+  const taxAmount = taxRate != null ? subtotal * taxRate : (taxFlat ?? 0);
+  const total = subtotal + taxAmount;
+
   return {
     lines: norm,
     subtotal,
-    tax: Number.isFinite(taxNum) ? taxNum : 0,
-    total: subtotal + (Number.isFinite(taxNum) ? taxNum : 0),
+    tax: taxAmount,
+    total
   };
 };
+
+// Derived bill status for table: "paid", "overdue", "open"
+const deriveBillStatus = (b) => {
+  const status = String(b?.status || '').toLowerCase();
+
+  // 1️⃣ Always respect the saved status if it's valid
+  if (status === 'paid') return 'paid';
+  if (status === 'overdue') return 'overdue';
+
+  // 2️⃣ For "open" bills, check due date automatically
+  if (status === 'open') {
+    const due = b?.dueDate ? new Date(b.dueDate) : null;
+    if (due && !Number.isNaN(due.getTime())) {
+      const today0 = new Date();
+      today0.setHours(0, 0, 0, 0);
+      const due0 = new Date(due);
+      due0.setHours(0, 0, 0, 0);
+      if (due0 < today0) return 'overdue';
+    }
+    return 'open';
+  }
+
+  // 3️⃣ Fallback: compute from amounts (legacy safety)
+  const subtotal = sumSubtotal(b?.lines);
+  const total = Number(b?.total) || (subtotal + (Number(b?.tax) || 0));
+  const paidAmt = Number(b?.paidAmount) || 0;
+  if (paidAmt >= total) return 'paid';
+
+  return 'open';
+};
+const badgeClasses = (s) =>
+  'inline-flex items-center rounded-full px-2 py-0.5 text-xs border ' +
+  (s === 'paid'
+    ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+    : s === 'overdue'
+    ? 'bg-rose-50 text-rose-700 border-rose-200'
+    : /* open */
+      'bg-sky-50 text-sky-700 border-sky-200');
+
 const OPEN_DEFAULT = {
   id: '',
   vendorId: '',          // dropdown
@@ -45,7 +130,7 @@ const OPEN_DEFAULT = {
   billDate: today(),
   dueDate: '',
   lines: [{ description: '', qty: 1, rate: 0 }],
-  tax: 0,
+  tax: '0',              // keep as string so "18%" / "50" work
   subtotal: 0,
   total: 0,
   status: 'open',
@@ -83,11 +168,14 @@ export default function Bills() {
   const filtered = useMemo(() => {
     const s = q.trim().toLowerCase();
     if (!s) return rows;
-    return rows.filter((r) =>
-      (r.billNo || '').toLowerCase().includes(s) ||
-      (r.vendorName || '').toLowerCase().includes(s) ||
-      (r.status || '').toLowerCase().includes(s)
-    );
+    return rows.filter((r) => {
+      const derived = deriveBillStatus(r);
+      return (
+        (r.billNo || '').toLowerCase().includes(s) ||
+        (r.vendorName || '').toLowerCase().includes(s) ||
+        derived.includes(s) // "open", "overdue", "paid"
+      );
+    });
   }, [rows, q]);
 
   /* ---------- CRUD ---------- */
@@ -110,9 +198,12 @@ export default function Bills() {
         qty: Number(l.qty) || 0,
         rate: Number(l.rate) || 0,
       })) : [{ description: '', qty: 1, rate: 0 }],
-      tax: Number(row.tax) || 0,
-      ...computeTotals(row.lines, row.tax),
+      // Pre-fill tax input as string of existing tax AMOUNT so users can also switch to "18%"
+      tax: String(row.tax ?? '0'),
+      // live totals re-compute from lines + tax input
       status: String(row.status || 'open').toLowerCase(),
+      subtotal: 0,
+      total: 0,
     });
     setErrors({});
     setFormOpen(true);
@@ -177,7 +268,7 @@ export default function Bills() {
       billDate: form.billDate || today(),
       dueDate: form.dueDate || undefined,
       lines: lines.map(({ description, qty, rate }) => ({ description, qty, rate })),
-      tax,
+      tax, // send computed TAX AMOUNT (keeps backend unchanged)
       status: String(form.status || 'open').toLowerCase(),
     };
 
@@ -215,7 +306,7 @@ export default function Bills() {
       <div className="flex flex-wrap items-center gap-3 mb-3">
         <input
           className="w-72 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-400"
-          placeholder="Search bill #, vendor, status"
+          placeholder="Search bill Id, vendor, status"
           value={q}
           onChange={(e) => setQ(e.target.value)}
         />
@@ -227,27 +318,19 @@ export default function Bills() {
           empty="No bills"
           initialSort={{ key: 'billDate', dir: 'desc' }}
           columns={[
-            { key: 'billNo', header: 'Bill #' },
+            { key: 'billNo', header: 'Id' },
             { key: 'vendorName', header: 'Vendor' },
             { key: 'billDate', header: 'Date', render: (r) => dd(r.billDate) },
             { key: 'dueDate', header: 'Due', render: (r) => dd(r.dueDate) },
-            { key: 'status', header: 'Status',
-              render: (r) => (
-                <span className={
-                  'inline-flex items-center rounded-full px-2 py-0.5 text-xs border ' +
-                  (r.status === 'paid'
-                    ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
-                    : r.status === 'approved'
-                    ? 'bg-amber-50 text-amber-700 border-amber-200'
-                    : r.status === 'void'
-                    ? 'bg-slate-50 text-slate-700 border-slate-200'
-                    : 'bg-sky-50 text-sky-700 border-sky-200')
-                }>
-                  {r.status}
-                </span>
-              )
+            {
+              key: 'status',
+              header: 'Status',
+              render: (r) => {
+                const s = deriveBillStatus(r); // "open" | "overdue" | "paid"
+                return <span className={badgeClasses(s)}>{s}</span>;
+              },
             },
-            { key: 'total', header: 'Total', align: 'right', render: (r) => inr(Number(r.total) || 0) },
+            { key: 'total', header: 'Total', align: 'right', render: (r) => inr(Number(r.total) || (sumSubtotal(r.lines) + (Number(r.tax) || 0))) },
             {
               key: '_actions', header: 'Actions', align: 'right',
               render: (r) => (
@@ -302,20 +385,21 @@ export default function Bills() {
                     </option>
                   ))}
                 </select>
-                <input
+                {/* <input
                   className={inClass(errors.vendor)}
                   placeholder="Or type new vendor name"
                   value={form.vendorName ?? ''}
                   onChange={(e) => setForm({ ...form, vendorName: e.target.value, vendorId: '' })}
-                />
+                /> */}
               </div>
             </Field>
 
-            <Field label="Bill #" >
+            <Field label="Bill #">
               <input
                 className={inClass()}
                 value={form.billNo ?? ''}
-                onChange={(e) => setForm({ ...form, billNo: e.target.value })}
+                readOnly
+                placeholder="auto"
               />
             </Field>
 
@@ -378,15 +462,12 @@ export default function Bills() {
               />
             </Field>
 
-            <Field label="Tax (₹)">
+            <Field label="Tax (%, fraction, or ₹ flat)">
               <input
-                type="number"
                 className={inClass()}
-                value={form.tax ?? 0}
-                onChange={(e) => {
-                  const v = Number(e.target.value);
-                  setForm({ ...form, tax: Number.isFinite(v) ? v : 0 });
-                }}
+                placeholder="e.g. 18% or 0.18 or 50"
+                value={String(form.tax ?? '')}
+                onChange={(e) => setForm({ ...form, tax: e.target.value })}
               />
             </Field>
 
