@@ -133,7 +133,7 @@ export default function Login() {
           <LogoMark />
           <div className="text-center">
             <h1 className="text-3xl font-semibold text-slate-900 tracking-tight">
-              LedgerFlow
+              Invoice Intelligence
             </h1>
             <p className="mt-1 text-slate-600">
               Invoices, payables & cash intelligence — all in one place.
@@ -432,7 +432,7 @@ export default function Login() {
           </div>
 
           <div className="mt-4 text-center text-xs text-slate-500">
-            © {new Date().getFullYear()} LedgerFlow
+            © {new Date().getFullYear()} Invoice Intelligence
           </div>
         </div>
       </div>
